@@ -426,6 +426,125 @@ func TestDealerYieldDoesNotBlockCalleeOnSlowCaller(t *testing.T) {
 	}
 }
 
+// unauthSlowPeer attaches a fresh anonymous-auth client to the router with a
+// router-to-client outbound queue of `qsize`, drains the WELCOME, and returns
+// the client-side peer. Used by tests that need precise control over how
+// quickly the test side reads (or doesn't read) router-to-client traffic.
+func unauthSlowPeer(t *testing.T, r Router, qsize int) wamp.Peer {
+	t.Helper()
+	client, server := transport.LinkedPeersQSize(qsize)
+	go func() {
+		client.Send() <- &wamp.Hello{Realm: testRealm, Details: clientRoles}
+	}()
+	require.NoError(t, r.Attach(server))
+	msg, err := wamp.RecvTimeout(client, time.Second)
+	require.NoError(t, err, "no WELCOME on slow peer")
+	_, ok := msg.(*wamp.Welcome)
+	require.True(t, ok, "expected WELCOME, got %T", msg)
+	return client
+}
+
+// TestSlowSubscriberDoesNotBlockBroker pins the broker.trySend
+// non-blocking semantics: a subscriber whose outbound queue is full
+// must NOT stall fan-out to other subscribers. The slow subscriber's
+// EVENT is silently dropped (the broker logs a "Dropped EVENT" warning),
+// while the fast subscriber receives the event normally.
+//
+// Adjacent neighbor of #324: same broker fanout, different blocked party.
+func TestSlowSubscriberDoesNotBlockBroker(t *testing.T) {
+	r := newTestRouter(t)
+
+	// Slow subscriber: 1-slot queue, used up after SUBSCRIBED ack and
+	// then never drained again.
+	slow := unauthSlowPeer(t, r, 1)
+	slow.Send() <- &wamp.Subscribe{Request: 1, Topic: testTopic}
+	msg, err := wamp.RecvTimeout(slow, time.Second)
+	require.NoError(t, err)
+	_, ok := msg.(*wamp.Subscribed)
+	require.True(t, ok, "expected SUBSCRIBED on slow peer, got %T", msg)
+	// Slow peer no longer drains anything.
+
+	// Fast subscriber: normal queue.
+	fast := testClient(t, r)
+	fast.Send() <- &wamp.Subscribe{Request: 1, Topic: testTopic}
+	msg, err = wamp.RecvTimeout(fast, time.Second)
+	require.NoError(t, err)
+	_, ok = msg.(*wamp.Subscribed)
+	require.True(t, ok)
+
+	// Publisher.
+	pub := testClient(t, r)
+	pub.Send() <- &wamp.Publish{
+		Request: 1, Topic: testTopic,
+		Options:   wamp.Dict{wamp.OptAcknowledge: true},
+		Arguments: wamp.List{"hi"},
+	}
+
+	// Fast subscriber must still receive the EVENT promptly.
+	got := false
+	for !got {
+		select {
+		case msg := <-fast.Recv():
+			if _, isPublished := msg.(*wamp.Published); isPublished {
+				continue // publisher's PUBLISHED ack arrives interleaved
+			}
+			_, ok := msg.(*wamp.Event)
+			require.True(t, ok, "fast subscriber: expected EVENT, got %T", msg)
+			got = true
+		case <-time.After(time.Second):
+			t.Fatal("fast subscriber did not get EVENT — slow subscriber stalled fan-out?")
+		}
+	}
+}
+
+// TestCallerDisconnectMidCall verifies dealer cleanup when the caller
+// disconnects after sending CALL but before YIELD arrives. The dealer's
+// syncYield should observe the missing caller, log it, and clean up
+// without erroring or leaking. Callee remains functional afterwards.
+//
+// Adjacent to #324 — covers the inverse of the slow-caller leak: a
+// gone-caller, which is a more extreme version of "caller can't receive".
+func TestCallerDisconnectMidCall(t *testing.T) {
+	r := newTestRouter(t)
+
+	callee := testClient(t, r)
+	const proc = wamp.URI("nexus.test.midcall")
+	callee.Send() <- &wamp.Register{Request: 1, Procedure: proc}
+	msg, err := wamp.RecvTimeout(callee, time.Second)
+	require.NoError(t, err)
+	_, ok := msg.(*wamp.Registered)
+	require.True(t, ok)
+
+	caller := testClient(t, r)
+	caller.Send() <- &wamp.Call{Request: 1, Procedure: proc}
+	msg, err = wamp.RecvTimeout(callee, time.Second)
+	require.NoError(t, err)
+	inv, ok := msg.(*wamp.Invocation)
+	require.True(t, ok)
+
+	// Caller disconnects.
+	caller.Close()
+
+	// Give the realm time to process the leave (asynchronous via onLeave).
+	time.Sleep(100 * time.Millisecond)
+
+	// Callee returns YIELD for an orphaned call. Dealer must accept it
+	// without error and clean up state.
+	callee.Send() <- &wamp.Yield{
+		Request: inv.Request, Arguments: wamp.List{"result for nobody"},
+	}
+
+	// Sanity: callee remains responsive.
+	callee.Send() <- &wamp.Subscribe{Request: 100, Topic: testTopic}
+	select {
+	case msg := <-callee.Recv():
+		_, ok := msg.(*wamp.Subscribed)
+		require.True(t, ok, "expected SUBSCRIBED, got %T", msg)
+	case <-time.After(time.Second):
+		t.Fatal("callee not responsive after orphaned YIELD for disconnected caller")
+	}
+}
+
 func TestRouterCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
