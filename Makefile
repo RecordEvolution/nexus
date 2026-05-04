@@ -36,10 +36,21 @@ test-coverage:
 	@printf 'total coverage: %s\n' "$$(cat coverage.txt)"
 
 # Rewrite the README coverage badge line to a shields.io URL with the
-# current percentage. shields.io renders the badge on the fly — no SVG file
-# is committed.
+# current percentage and a color picked from the same thresholds shields.io
+# uses for its built-in coverage badges. shields.io renders the badge on
+# the fly, so no SVG file is committed. Idempotent: same percentage → no
+# diff. Cross-platform sed -i (works under BSD and GNU sed).
 coverage-badge: test-coverage
-	go run ./scripts/coverage-badge
+	@PCT=$$(tr -d '%' < coverage.txt); \
+	COLOR=$$(awk -v p="$$PCT" 'BEGIN { \
+		if (p<50) print "red"; \
+		else if (p<70) print "orange"; \
+		else if (p<80) print "yellow"; \
+		else if (p<90) print "yellowgreen"; \
+		else print "brightgreen" }'); \
+	sed -i.bak -E "s|coverage-[0-9.]+%25-[a-z]+|coverage-$${PCT}%25-$${COLOR}|" README.md; \
+	rm -f README.md.bak; \
+	printf 'coverage badge: %s%% (%s)\n' "$$PCT" "$$COLOR"
 
 # Convenience: run the YAML wire-frame conformance harness only.
 spec-conformance:

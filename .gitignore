@@ -2,8 +2,6 @@
 *.log
 nexusd/nexusd
 *coverage*
-!scripts/coverage-badge/
-!scripts/coverage-badge/**
 
 # Binaries for programs and plugins
 *.exe
