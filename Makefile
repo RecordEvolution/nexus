@@ -1,6 +1,6 @@
 SERVICE_DIR = nexusd
 
-.PHONY: all vet test service clean install uninstall
+.PHONY: all vet test service clean install uninstall test-coverage coverage-badge coverage spec-conformance
 
 all: vet test service
 
@@ -26,6 +26,27 @@ benchmark:
 	go test ./test -run=XXX -bench=. -scheme=tcp
 	go test ./test -run=XXX -bench=. -scheme=tcps
 	go test ./test -run=XXX -bench=. -scheme=ws -compress
+
+# Run the full suite once with coverage instrumentation. The transport-matrix
+# variants in `test` are not re-run here — they exercise transport edge cases,
+# not different code paths in the router/wamp/client packages we measure.
+test-coverage:
+	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -func=coverage.out | tail -1 | awk '{print $$3}' > coverage.txt
+	@printf 'total coverage: %s\n' "$$(cat coverage.txt)"
+
+# Rewrite the README coverage badge line to a shields.io URL with the
+# current percentage. shields.io renders the badge on the fly — no SVG file
+# is committed.
+coverage-badge: test-coverage
+	go run ./scripts/coverage-badge
+
+# Convenience: run the YAML wire-frame conformance harness only.
+spec-conformance:
+	go test ./spec/runner/...
+
+# Top-level: tests with coverage + badge regen. Run before pushing.
+coverage: coverage-badge
 
 service: $(SERVICE_DIR)/nexusd
 

@@ -1,0 +1,16 @@
+name: register-call-invocation-yield-result-roundtrip
+spec_section: "Basic Profile §3.7"
+realm: realm1
+serializer: json
+skip: "register/call/result roundtrip needs two peers in the same plan; planned for the multi-peer extension of the runner"
+steps:
+  - send: [1, "realm1", {roles: {callee: {}, caller: {}}}]
+  - expect: [2, "{{$session_id:int}}", "_"]
+  - send: [64, 2001, {}, "spec.test.proc"]
+    note: "REGISTER"
+  - expect: [65, 2001, "{{$reg_id:int}}"]
+    note: "REGISTERED"
+  - send: [48, 2002, {}, "spec.test.proc", [1, 2]]
+    note: "CALL — same peer, currently routed to itself by single-peer plans"
+  - expect: [68, "{{$inv_id:int}}", "{{$reg_id:int}}", "_", [1, 2]]
+    note: "INVOCATION delivered back to this peer"
