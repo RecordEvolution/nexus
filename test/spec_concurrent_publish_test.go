@@ -63,18 +63,19 @@ func raceConnect(t *testing.T, addr string) *client.Client {
 // gammazero/nexus#343.
 //
 // Failure mode (without the fix in #344):
-//   broker.publish() creates a single `details := wamp.Dict{}` per publish
-//   call. That same map is aliased into every outbound *wamp.Event for
-//   every matching subscriber. When the subscription used pattern-based
-//   matching, prepareEvent additionally writes msg.Topic into details. So:
 //
-//     1. prepareEvent(sub A) writes details["topic"] = topic, sends event A
-//     2. sub A's transport goroutine begins JSON-encoding event A and
-//        iterates details
-//     3. prepareEvent(sub B) writes details["topic"] = topic again — to the
-//        same shared map
-//     4. Go runtime detects "concurrent map iteration and map write" and
-//        panics, killing the process.
+//	broker.publish() creates a single `details := wamp.Dict{}` per publish
+//	call. That same map is aliased into every outbound *wamp.Event for
+//	every matching subscriber. When the subscription used pattern-based
+//	matching, prepareEvent additionally writes msg.Topic into details. So:
+//
+//	  1. prepareEvent(sub A) writes details["topic"] = topic, sends event A
+//	  2. sub A's transport goroutine begins JSON-encoding event A and
+//	     iterates details
+//	  3. prepareEvent(sub B) writes details["topic"] = topic again — to the
+//	     same shared map
+//	  4. Go runtime detects "concurrent map iteration and map write" and
+//	     panics, killing the process.
 //
 // We force the race window by:
 //   - Pattern-matched (prefix) subscriptions, which set sendTopic=true and
