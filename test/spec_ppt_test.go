@@ -28,7 +28,7 @@ func TestSpecPPTCallRoundTrip(t *testing.T) {
 		gotArgs <- inv.Arguments
 		// Echo back with the same PPT options.
 		return client.InvokeResult{
-			Args: inv.Arguments,
+			Args:   inv.Arguments,
 			Kwargs: inv.ArgumentsKw,
 			Options: wamp.Dict{
 				wamp.OptPPTScheme:     "mqtt",

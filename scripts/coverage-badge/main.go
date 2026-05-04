@@ -5,13 +5,15 @@
 // Usage: go run ./scripts/coverage-badge
 //
 // Input:
-//   coverage.txt — single line containing a percentage like "57.4%"
-//                  (produced by `go tool cover -func=coverage.out | tail -1 | awk '{print $3}'`)
+//
+//	coverage.txt — single line containing a percentage like "57.4%"
+//	               (produced by `go tool cover -func=coverage.out | tail -1 | awk '{print $3}'`)
 //
 // Output:
-//   README.md — the line `![Coverage](...)` is rewritten in place. shields.io
-//   renders the badge on the fly when the README is viewed, so there's no
-//   committed SVG to maintain. Idempotent: same percentage → no diff.
+//
+//	README.md — the line `![Coverage](...)` is rewritten in place. shields.io
+//	renders the badge on the fly when the README is viewed, so there's no
+//	committed SVG to maintain. Idempotent: same percentage → no diff.
 package main
 
 import (

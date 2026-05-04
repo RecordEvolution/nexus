@@ -12,11 +12,12 @@ import (
 // message).
 //
 // Placeholders in expected strings:
-//   "{{$name}}"          — match any value, capture under `name`
-//   "{{$name:int}}"      — match an int (allows JSON-number floats), capture
-//   "{{$name:string}}"   — match a string
-//   "{{$name:uri}}"      — match a string shaped like a WAMP URI
-//   "{{$name:dict}}"     — match a JSON object
+//
+//	"{{$name}}"          — match any value, capture under `name`
+//	"{{$name:int}}"      — match an int (allows JSON-number floats), capture
+//	"{{$name:string}}"   — match a string
+//	"{{$name:uri}}"      — match a string shaped like a WAMP URI
+//	"{{$name:dict}}"     — match a JSON object
 //
 // If `name` is reused across steps, subsequent appearances must equal the
 // captured value (allows e.g. session ID to be checked across messages).

@@ -19,9 +19,9 @@ import (
 // cryptosignKeyStore is a minimal KeyStore for the cryptosign-auth tests.
 // It stores a single ed25519-style public key keyed by authid.
 type cryptosignKeyStore struct {
-	authid    string
-	pubkey    [32]byte
-	authrole  string
+	authid   string
+	pubkey   [32]byte
+	authrole string
 }
 
 func (k *cryptosignKeyStore) AuthKey(authid, _ string) ([]byte, error) {
