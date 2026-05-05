@@ -13,6 +13,7 @@ import (
 func TestSessionKill(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		cli1 := testClient(t, r)
 		cli2 := testClient(t, r)
@@ -66,6 +67,7 @@ func TestSessionKill(t *testing.T) {
 func TestSessionKillAll(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		cli1 := testClient(t, r)
 		cli2 := testClient(t, r)
@@ -109,6 +111,7 @@ func TestSessionKillAll(t *testing.T) {
 func TestSessionKillByAuthid(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		cli1 := testClient(t, r)
 		cli2 := testClient(t, r)
@@ -158,6 +161,7 @@ func TestSessionKillByAuthid(t *testing.T) {
 func TestSessionModifyDetails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 		sessID := caller.ID

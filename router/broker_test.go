@@ -11,17 +11,20 @@ import (
 )
 
 type testPeer struct {
-	in chan wamp.Message
+	in   chan wamp.Message
+	done chan struct{}
 }
 
 func newTestPeer() *testPeer {
 	return &testPeer{
-		in: make(chan wamp.Message, 1),
+		in:   make(chan wamp.Message, 1),
+		done: make(chan struct{}),
 	}
 }
 
 func (p *testPeer) Recv() <-chan wamp.Message { return p.in }
 func (p *testPeer) Send() chan<- wamp.Message { return p.in }
+func (p *testPeer) Done() <-chan struct{}     { return p.done }
 func (p *testPeer) Close()                    {}
 
 func (p *testPeer) IsLocal() bool { return true }
@@ -32,17 +35,21 @@ func (p *testPeer) IsLocal() bool { return true }
 // broker/dealer's internal maps for a brief window. trySend on such a
 // session must not panic.
 type closedSendPeer struct {
-	in chan wamp.Message
+	in   chan wamp.Message
+	done chan struct{}
 }
 
 func newClosedSendPeer() *closedSendPeer {
 	ch := make(chan wamp.Message)
 	close(ch)
-	return &closedSendPeer{in: ch}
+	d := make(chan struct{})
+	close(d)
+	return &closedSendPeer{in: ch, done: d}
 }
 
 func (p *closedSendPeer) Recv() <-chan wamp.Message { return p.in }
 func (p *closedSendPeer) Send() chan<- wamp.Message { return p.in }
+func (p *closedSendPeer) Done() <-chan struct{}     { return p.done }
 func (p *closedSendPeer) Close()                    {}
 func (p *closedSendPeer) IsLocal() bool             { return true }
 

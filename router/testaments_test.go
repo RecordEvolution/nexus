@@ -13,6 +13,7 @@ import (
 func TestSessionTestaments(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		sub := testClient(t, r)
 		subscribeID := wamp.GlobalID()

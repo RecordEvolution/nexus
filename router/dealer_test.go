@@ -32,6 +32,12 @@ func newTestDealer(t *testing.T) (*dealer, wamp.Peer) {
 	d.setMetaPeer(rtr)
 	t.Cleanup(func() {
 		d.close()
+		// Close both peers of the meta linked-pair so the transport's
+		// internal forwarder goroutines exit. Required for synctest
+		// tests since the forwarders would otherwise be parked when
+		// the bubble's deadlock check fires.
+		metaClient.Close()
+		rtr.Close()
 	})
 	return d, metaClient
 }

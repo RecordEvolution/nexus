@@ -177,32 +177,39 @@ func (rs *rawSocketPeer) Recv() <-chan wamp.Message { return rs.rd }
 
 func (rs *rawSocketPeer) Send() chan<- wamp.Message { return rs.wr }
 
+// Done returns a channel that is closed when the peer is closing. It
+// is closed before the Send channel, so a goroutine selecting on both
+// Send and Done is guaranteed to wake via Done before the runtime
+// observes the Send channel as closed.
+func (rs *rawSocketPeer) Done() <-chan struct{} { return rs.closed }
+
 func (rs *rawSocketPeer) IsLocal() bool { return false }
 
-// Close closes the rawsocket peer. This closes the local send channel, and
-// sends a close control message to the socket to tell the other side to close.
-// Safe to call concurrently and idempotent — a second call is a no-op so
-// the realm shutdown path can defensively close peers that may already
-// have been closed (by a prior protocol-violation path or by their own
-// session-handler goroutine).
+// Close closes the rawsocket peer. Idempotent and safe to call
+// concurrently with Send — the wr channel is intentionally NOT
+// closed (only sendHandler reads from it and exits cleanly via
+// cancelSender). Senders that may race with Close should use the
+// cooperative Send+Done select pattern from wamp.Peer.
 //
-// *** Do not call Send after calling Close. ***
+// Bare `peer.Send() <- msg` after Close blocks forever rather than
+// panicking. Callers that don't use the cooperative pattern must
+// ensure their sender goroutines exit before calling Close.
+//
+// *** Do not call Send after calling Close (without selecting on
+// Done()). ***
 func (rs *rawSocketPeer) Close() {
 	rs.closeOnce.Do(func() {
-		// Tell sendHandler to exit, and discard any queued messages. Do
-		// not close wr channel in case there are incoming messages during
-		// close.
-		rs.cancelSender()
-		<-rs.writerDone
-		close(rs.wr)
-		for range rs.wr {
-		}
-
-		// Tell recvHandler to close.
+		// Close Done first so Send goroutines selecting on it wake
+		// and abandon their writes.
 		close(rs.closed)
 
-		// Ignore errors since socket may have been closed by other side
-		// first in response to a goodbye message.
+		// Stop sendHandler. Do not close rs.wr — that would race
+		// with concurrent Send from external goroutines.
+		rs.cancelSender()
+		<-rs.writerDone
+
+		// Ignore errors since socket may have been closed by other
+		// side first in response to a goodbye message.
 		_ = rs.conn.Close()
 	})
 }

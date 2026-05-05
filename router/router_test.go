@@ -82,6 +82,7 @@ func newTestRouter(t *testing.T) Router {
 
 func testClientInRealm(t *testing.T, r Router, realm wamp.URI) *wamp.Session {
 	client, server := transport.LinkedPeers()
+	t.Cleanup(func() { client.Close() })
 	// Run as goroutine since Send will block until message read by router, if
 	// client uses unbuffered channel.
 	details := clientRoles
@@ -112,6 +113,7 @@ func testClient(t *testing.T, r Router) *wamp.Session {
 func TestHandshake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		cli := testClient(t, r)
 		cli.Send() <- &wamp.Goodbye{}
@@ -125,6 +127,7 @@ func TestHandshake(t *testing.T) {
 func TestHandshakeBadRealm(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client, server := transport.LinkedPeers()
 		go func() {
 			client.Send() <- &wamp.Hello{Realm: "does.not.exist"}
@@ -143,6 +146,7 @@ func TestHandshakeBadRealm(t *testing.T) {
 func TestProtocolViolation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		cli := testClient(t, r)
 
 		// Send HELLO message after session established.
@@ -200,6 +204,7 @@ func newStrictIDsTestRouter(t *testing.T) Router {
 func TestStrictRequestIDsAccepted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newStrictIDsTestRouter(t)
+		defer r.Close()
 		cli := testClient(t, r)
 
 		// First request: id=1.
@@ -224,6 +229,7 @@ func TestStrictRequestIDsAccepted(t *testing.T) {
 func TestStrictRequestIDsRejectsOutOfSequence(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newStrictIDsTestRouter(t)
+		defer r.Close()
 		cli := testClient(t, r)
 
 		// Skip id=1, start at 99 — protocol violation.
@@ -241,6 +247,7 @@ func TestStrictRequestIDsRejectsOutOfSequence(t *testing.T) {
 func TestStrictRequestIDsRejectsGap(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newStrictIDsTestRouter(t)
+		defer r.Close()
 		cli := testClient(t, r)
 
 		cli.Send() <- &wamp.Subscribe{Request: 1, Topic: testTopic}
@@ -347,6 +354,7 @@ func TestRealmShutdownDrainsActorsBeforePeerClose(t *testing.T) {
 func TestRouterSubscribe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		sub := testClient(t, r)
 
 		subscribeID := wamp.GlobalID()
@@ -373,6 +381,7 @@ func TestRouterSubscribe(t *testing.T) {
 func TestPublishAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -393,6 +402,7 @@ func TestPublishAcknowledge(t *testing.T) {
 func TestPublishFalseAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -414,6 +424,7 @@ func TestPublishFalseAcknowledge(t *testing.T) {
 func TestPublishNoAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -624,7 +635,11 @@ func TestSlowCallerOnInvocationError(t *testing.T) {
 func TestSlowCalleeRecoverableAfterDrain(t *testing.T) {
 	r := newTestRouter(t)
 
-	// Callee with 1-slot queue.
+	// Callee with 1-slot queue. With the forwarder-based localPeer,
+	// the effective r→c buffer is qsize (rOut) + 1 (forwarder
+	// in-flight) = 2 slots. So we need to send TWO INVOCATIONs to
+	// fill the buffer before the third call hits the dealer's
+	// non-blocking trySend default branch.
 	callee := unauthSlowPeer(t, r, 1)
 	const proc = wamp.URI("nexus.test.slowcallee")
 	callee.Send() <- &wamp.Register{Request: 1, Procedure: proc}
@@ -635,48 +650,49 @@ func TestSlowCalleeRecoverableAfterDrain(t *testing.T) {
 
 	caller := testClient(t, r)
 
-	// First call: fills callee's 1-slot queue with the INVOCATION. We
-	// intentionally do NOT drain it — keeping the queue full is the
-	// whole point of the next assertion.
+	// Calls 1 and 2: fill callee's 2-slot effective queue. We
+	// intentionally do NOT drain them — keeping the queue full is
+	// the whole point of the next assertion.
 	caller.Send() <- &wamp.Call{Request: 1, Procedure: proc}
-	// Brief sleep gives the dealer's actor goroutine time to pick up
-	// the queued action and dispatch INVOCATION 1 onto callee's
-	// outbound channel before we issue CALL 2.
+	caller.Send() <- &wamp.Call{Request: 2, Procedure: proc}
+	// Brief sleep lets the dealer dispatch both INVOCATIONs onto
+	// callee's outbound channel before we issue CALL 3.
 	time.Sleep(100 * time.Millisecond)
 
-	// Second call: callee queue is now full. Dealer's syncCall must
+	// Third call: callee queue is now full. Dealer's syncCall must
 	// react with ERROR(network_failure) to the caller, not stall.
-	caller.Send() <- &wamp.Call{Request: 2, Procedure: proc}
+	caller.Send() <- &wamp.Call{Request: 3, Procedure: proc}
 	select {
 	case msg := <-caller.Recv():
 		errMsg, ok := msg.(*wamp.Error)
 		require.True(t, ok, "expected ERROR for blocked-callee call, got %T", msg)
 		require.Equal(t, wamp.ErrNetworkFailure, errMsg.Error)
-		require.Equal(t, wamp.ID(2), errMsg.Request)
+		require.Equal(t, wamp.ID(3), errMsg.Request)
 	case <-time.After(time.Second):
 		t.Fatal("dealer did not return ERROR to caller despite blocked callee")
 	}
 
-	// Now drain INVOCATION 1 from callee.
-	msg, err = wamp.RecvTimeout(callee, time.Second)
-	require.NoError(t, err)
-	inv1, ok := msg.(*wamp.Invocation)
-	require.True(t, ok)
+	// Drain INVOCATION 1 and 2 from callee, return YIELDs to free
+	// the queue.
+	for i := 1; i <= 2; i++ {
+		msg, err = wamp.RecvTimeout(callee, time.Second)
+		require.NoError(t, err)
+		inv, ok := msg.(*wamp.Invocation)
+		require.True(t, ok)
+		callee.Send() <- &wamp.Yield{Request: inv.Request, Arguments: wamp.List{"ok"}}
+		msg, err = wamp.RecvTimeout(caller, time.Second)
+		require.NoError(t, err)
+		_, ok = msg.(*wamp.Result)
+		require.True(t, ok, "expected RESULT for call %d, got %T", i, msg)
+	}
 
-	// Callee returns YIELD; caller gets RESULT.
-	callee.Send() <- &wamp.Yield{Request: inv1.Request, Arguments: wamp.List{"ok"}}
-	msg, err = wamp.RecvTimeout(caller, time.Second)
-	require.NoError(t, err)
-	_, ok = msg.(*wamp.Result)
-	require.True(t, ok, "expected RESULT for first call, got %T", msg)
-
-	// Third call: callee is responsive again, must succeed.
-	caller.Send() <- &wamp.Call{Request: 3, Procedure: proc}
+	// Fourth call: callee is responsive again, must succeed.
+	caller.Send() <- &wamp.Call{Request: 4, Procedure: proc}
 	msg, err = wamp.RecvTimeout(callee, time.Second)
 	require.NoError(t, err)
 	inv3, ok := msg.(*wamp.Invocation)
 	require.True(t, ok, "registration should still be live; expected INVOCATION, got %T", msg)
-	callee.Send() <- &wamp.Yield{Request: inv3.Request, Arguments: wamp.List{"third"}}
+	callee.Send() <- &wamp.Yield{Request: inv3.Request, Arguments: wamp.List{"fourth"}}
 	msg, err = wamp.RecvTimeout(caller, time.Second)
 	require.NoError(t, err)
 	_, ok = msg.(*wamp.Result)
@@ -734,6 +750,7 @@ func TestCallerDisconnectMidCall(t *testing.T) {
 func TestRouterCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		callee := testClient(t, r)
 
 		registerID := wamp.GlobalID()
@@ -773,6 +790,7 @@ func TestRouterCall(t *testing.T) {
 func TestSessionCountMetaProcedure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 
@@ -841,6 +859,7 @@ func TestSessionCountMetaProcedure(t *testing.T) {
 func TestListSessionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 		sessID := caller.ID
@@ -886,6 +905,7 @@ func TestListSessionMetaProcedures(t *testing.T) {
 func TestGetSessionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 		sessID := caller.ID
@@ -926,6 +946,7 @@ func TestGetSessionMetaProcedures(t *testing.T) {
 func TestRegistrationMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		caller := testClient(t, r)
 
 		// ----- Test wamp.registration.list meta procedure -----
@@ -1088,6 +1109,7 @@ func TestRegistrationMetaProcedures(t *testing.T) {
 func TestSubscriptionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		caller := testClient(t, r)
 
 		// ----- Test wamp.subscription.list meta procedure -----
