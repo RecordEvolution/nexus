@@ -157,39 +157,33 @@ func TestRawSocketC2_TruncatedFrame(t *testing.T) {
 	}
 }
 
-// TestRawSocketC5_DeserializerError pins the current behavior:
-// when a frame's body is well-framed but its payload fails
-// deserialization, recvHandler logs the error and *continues* the
-// MsgLoop (does not abort the connection). A subsequent valid frame
-// is delivered normally.
+// TestRawSocketC5_DeserializerErrorAborts pins WAMP §5.3.1 strict
+// behavior: when a frame's body is well-framed but its payload fails
+// deserialization, recvHandler logs the error, closes the connection,
+// and exits — same teardown as a torn read. The peer's Recv channel
+// closes; no further frames are processed even if more arrive on the
+// wire.
 //
-// WAMP §5.3.1 calls protocol violations a hard-error condition that
-// SHOULD trigger an ABORT. nexus's permissive behavior is at odds
-// with that — pinning it here makes any future strict-mode change
-// visible.
-func TestRawSocketC5_DeserializerError(t *testing.T) {
+// Prior to the recvHandler fix in this commit, recvHandler silently
+// skipped the bad frame (`continue MsgLoop`) and kept reading —
+// permissive but at odds with the spec.
+func TestRawSocketC5_DeserializerErrorAborts(t *testing.T) {
 	client, peer := newPipedRawSocket(t, 4) // 2^13 = 8192
 	t.Cleanup(func() { peer.Close() })
 
-	// First frame: body is `not valid json {` — well-framed but
-	// fails JSON deserialization.
+	// First (and only) frame the server processes: body is
+	// `not valid json {` — well-framed but fails JSON
+	// deserialization.
 	writeFrame(t, client, 0x00, []byte("not valid json {"))
 
-	// Second frame: a valid HELLO message in JSON form.
-	hello := wamp.Hello{Realm: "test", Details: wamp.Dict{}}
-	helloBytes, err := (&serialize.JSONSerializer{}).Serialize(&hello)
-	require.NoError(t, err)
-	writeFrame(t, client, 0x00, helloBytes)
-
-	// peer.Recv() should yield the HELLO. The bad first frame is
-	// silently skipped per current behavior.
+	// peer.Recv() must close (recvHandler returned via the new
+	// abort-on-deserialize-error path). A subsequent frame is
+	// irrelevant — we already proved recvHandler stopped.
 	select {
 	case msg, ok := <-peer.Recv():
-		require.True(t, ok, "Recv closed unexpectedly")
-		_, isHello := msg.(*wamp.Hello)
-		require.True(t, isHello, "expected HELLO after deserializer error skip, got %T", msg)
+		require.False(t, ok, "expected closed Recv after malformed frame, got msg %v", msg)
 	case <-time.After(time.Second):
-		require.FailNow(t, "peer.Recv() did not deliver post-error HELLO")
+		require.FailNow(t, "peer.Recv() did not close after malformed frame")
 	}
 	_ = client.Close()
 }
