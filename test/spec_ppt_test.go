@@ -13,19 +13,11 @@ import (
 
 // TestSpecPPTCallRoundTrip verifies a CALL with ppt_scheme set carries the
 // PPT options and payload through to the callee untouched (spec §14.7).
-//
-// Skipped on non-local transports: client.go's PPT pack/unpack helpers
-// assume args[0] survives the wire as either []byte (non-native
-// serializer) or *wamp.PassthruPayload (native). JSON wire turns []byte
-// into a base64 string and *PassthruPayload into a wamp.Dict, both of
-// which crash the type assertions in client.go's unpackPPTPayload.
-// That's a real client-side bug to fix separately (tracked in
-// IRONFLOCK_PLAN backlog as "PPT round-trip via non-local transport");
-// for now, this spec test pins the local-transport behavior only.
+// Exercises the non-native (msgpack) PPT serializer so the test
+// covers the binary-payload path across the full transport matrix
+// (local / ws+json / ws+msgpack / ws+cbor / tcp+msgpack / tcp+cbor /
+// wss / tcps / unix). Native is covered by TestSpecPPTPublishRoundTrip.
 func TestSpecPPTCallRoundTrip(t *testing.T) {
-	if scheme != "" {
-		t.Skip("client.go PPT pack/unpack only round-trips on local in-process transport")
-	}
 	checkGoLeaks(t)
 
 	callee := connectClient(t)
@@ -44,7 +36,7 @@ func TestSpecPPTCallRoundTrip(t *testing.T) {
 			Kwargs: inv.ArgumentsKw,
 			Options: wamp.Dict{
 				wamp.OptPPTScheme:     "mqtt",
-				wamp.OptPPTSerializer: "native",
+				wamp.OptPPTSerializer: "msgpack",
 			},
 		}
 	}, nil))
@@ -52,7 +44,7 @@ func TestSpecPPTCallRoundTrip(t *testing.T) {
 	caller := connectClient(t)
 	opts := wamp.Dict{
 		wamp.OptPPTScheme:     "mqtt",
-		wamp.OptPPTSerializer: "native",
+		wamp.OptPPTSerializer: "msgpack",
 	}
 	res, err := caller.Call(context.Background(), procName, opts,
 		wamp.List{"opaque-payload", int64(7)}, wamp.Dict{"k": "v"}, nil)
@@ -75,14 +67,10 @@ func TestSpecPPTCallRoundTrip(t *testing.T) {
 
 // TestSpecPPTPublishRoundTrip verifies PUBLISH with ppt_scheme carries the
 // PPT options and payload through to the subscriber untouched.
-//
-// Skipped on non-local transports for the same reason as
-// TestSpecPPTCallRoundTrip — client.go's PPT helpers don't round-trip
-// args[0] over a serialized wire.
+// Uses ppt_serializer="native" — args/kwargs ride the wire serializer
+// directly with no envelope, which complements the msgpack-envelope
+// path covered by TestSpecPPTCallRoundTrip.
 func TestSpecPPTPublishRoundTrip(t *testing.T) {
-	if scheme != "" {
-		t.Skip("client.go PPT pack/unpack only round-trips on local in-process transport")
-	}
 	checkGoLeaks(t)
 
 	sub := connectClient(t)
