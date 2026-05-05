@@ -26,6 +26,12 @@ const (
 	CBOR          = serialize.CBOR
 	WampPPTScheme = "wamp"
 	MqttPPTScheme = "mqtt"
+
+	// NativePPTSerializer is the ppt_serializer value indicating that the
+	// payload uses the same serializer as the WAMP message itself
+	// (spec §14.7). In this mode packPPTPayload does not envelope the
+	// args/kwargs.
+	NativePPTSerializer = "native"
 )
 
 const (
@@ -117,7 +123,7 @@ func isPPTSchemeValid(pptScheme string) bool {
 // receive side.
 func packPPTPayload(options wamp.Dict, args wamp.List, kwargs wamp.Dict) (wamp.List, wamp.Dict, error) {
 	pptSerializerStr, _ := options[wamp.OptPPTSerializer].(string)
-	if pptSerializerStr == "" || pptSerializerStr == "native" {
+	if pptSerializerStr == "" || pptSerializerStr == NativePPTSerializer {
 		// Native (or unspecified): no envelope; rely on the wire serializer.
 		return args, kwargs, nil
 	}
@@ -181,7 +187,7 @@ func pptPayloadBytes(v any) ([]byte, error) {
 // (Arguments, ArgumentsKw).
 func unpackPPTPayload(details wamp.Dict, args wamp.List, kwargs wamp.Dict) (wamp.List, wamp.Dict, error) {
 	pptSerializerStr, _ := details[wamp.OptPPTSerializer].(string)
-	if pptSerializerStr == "" || pptSerializerStr == "native" {
+	if pptSerializerStr == "" || pptSerializerStr == NativePPTSerializer {
 		return args, kwargs, nil
 	}
 
