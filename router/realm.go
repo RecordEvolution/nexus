@@ -218,6 +218,14 @@ func (r *realm) close() {
 	r.dealer.close()
 	r.broker.close()
 
+	// Now that all senders to the meta peer have stopped, close
+	// both peers of the meta linked-pair. This lets the transport's
+	// internal forwarder goroutines exit cleanly (the upstream
+	// localPeer just released its references; the new forwarder-
+	// based localPeer needs an explicit Close on each side).
+	r.metaPeer.Close()
+	r.metaSess.Peer.Close()
+
 	// Finally close realm's action channel.
 	close(r.actionChan)
 	<-r.stopped
@@ -277,7 +285,11 @@ func (r *realm) createMetaSession() {
 	// This session is the local leg of the router uplink.
 	r.metaSess = wamp.NewSession(rtr, metaID, wamp.Dict{"authrole": "trusted"}, nil)
 
-	// Run the handler for messages from the meta session.
+	// Run the handler for messages from the meta session. The peers
+	// are intentionally NOT closed here — the dealer continues to
+	// send meta events to r.metaPeer during its drain in realm.close,
+	// and closing too early would race those sends. Realm.close
+	// closes both meta peers after dealer.close + broker.close.
 	go func() {
 		_, _, err := r.handleInboundMessages(r.metaSess)
 		if err != nil {

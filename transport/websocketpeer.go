@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +92,8 @@ type websocketPeer struct {
 
 	recvDone   chan struct{}
 	writerDone chan struct{}
+
+	closeOnce sync.Once
 
 	log stdlog.StdLog
 }
@@ -228,39 +231,46 @@ func (w *websocketPeer) Send() chan<- wamp.Message { return w.wr }
 
 func (w *websocketPeer) IsLocal() bool { return false }
 
-// Close closes the websocket peer. This closes the local send channel, and
-// sends a close control message to the websocket to tell the other side to
-// close.
+// Close closes the websocket peer. Idempotent and safe to call
+// concurrently with Send — the wr channel is intentionally NOT
+// closed (only sendHandler reads from it and exits cleanly via
+// cancelSender). Senders that may race with Close should use the
+// cooperative Send+Done select pattern from wamp.Peer.
 //
-// *** Do not call Send after calling Close. ***
+// Bare `peer.Send() <- msg` after Close blocks forever rather than
+// panicking. Callers that don't use the cooperative pattern must
+// ensure their sender goroutines exit before calling Close.
+//
+// *** Do not call Send after calling Close (without selecting on
+// Done()). ***
 func (w *websocketPeer) Close() {
-	select {
-	case <-w.closed:
-		return
-	default:
-	}
+	w.closeOnce.Do(func() {
+		// Close Done first so Send goroutines selecting on it wake
+		// and abandon their writes.
+		close(w.closed)
 
-	// Tell sendHandler to exit and discard any queued messages. Do not close
-	// wr channel in case there are incoming messages during close.
-	w.cancelSender()
-	<-w.writerDone
-	close(w.wr)
-	for range w.wr {
-	}
+		// Stop sendHandler. Do not close w.wr — that would race
+		// with concurrent Send from external goroutines.
+		w.cancelSender()
+		<-w.writerDone
 
-	closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "goodbye")
+		closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "goodbye")
 
-	// Tell recvHandler to close.
-	close(w.closed)
+		// Ignore errors since websocket may have been closed by other
+		// side first in response to a goodbye message.
+		_ = w.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(ctrlTimeout))
+		_ = w.conn.Close()
 
-	// Ignore errors since websocket may have been closed by other side first
-	// in response to a goodbye message.
-	_ = w.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(ctrlTimeout))
-	_ = w.conn.Close()
-
-	// Wait for the recvHandler goroutine to exit.
-	<-w.recvDone
+		// Wait for the recvHandler goroutine to exit.
+		<-w.recvDone
+	})
 }
+
+// Done returns a channel that is closed when the peer is closing. It
+// is closed before the Send channel, so a goroutine selecting on both
+// Send and Done is guaranteed to wake via Done before the runtime
+// observes the Send channel as closed.
+func (w *websocketPeer) Done() <-chan struct{} { return w.closed }
 
 // sendHandler pulls messages from the write channel, and pushes them to the
 // websocket.

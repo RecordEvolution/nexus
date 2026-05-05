@@ -82,6 +82,7 @@ func newTestRouter(t *testing.T) Router {
 
 func testClientInRealm(t *testing.T, r Router, realm wamp.URI) *wamp.Session {
 	client, server := transport.LinkedPeers()
+	t.Cleanup(func() { client.Close() })
 	// Run as goroutine since Send will block until message read by router, if
 	// client uses unbuffered channel.
 	details := clientRoles
@@ -112,6 +113,7 @@ func testClient(t *testing.T, r Router) *wamp.Session {
 func TestHandshake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		cli := testClient(t, r)
 		cli.Send() <- &wamp.Goodbye{}
@@ -125,6 +127,7 @@ func TestHandshake(t *testing.T) {
 func TestHandshakeBadRealm(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client, server := transport.LinkedPeers()
 		go func() {
 			client.Send() <- &wamp.Hello{Realm: "does.not.exist"}
@@ -143,6 +146,7 @@ func TestHandshakeBadRealm(t *testing.T) {
 func TestProtocolViolation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		cli := testClient(t, r)
 
 		// Send HELLO message after session established.
@@ -175,6 +179,7 @@ func TestProtocolViolation(t *testing.T) {
 func TestRouterSubscribe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		sub := testClient(t, r)
 
 		subscribeID := wamp.GlobalID()
@@ -201,6 +206,7 @@ func TestRouterSubscribe(t *testing.T) {
 func TestPublishAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -221,6 +227,7 @@ func TestPublishAcknowledge(t *testing.T) {
 func TestPublishFalseAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -242,6 +249,7 @@ func TestPublishFalseAcknowledge(t *testing.T) {
 func TestPublishNoAcknowledge(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		client := testClient(t, r)
 
 		id := wamp.GlobalID()
@@ -258,6 +266,7 @@ func TestPublishNoAcknowledge(t *testing.T) {
 func TestRouterCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		callee := testClient(t, r)
 
 		registerID := wamp.GlobalID()
@@ -297,6 +306,7 @@ func TestRouterCall(t *testing.T) {
 func TestSessionCountMetaProcedure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 
@@ -365,6 +375,7 @@ func TestSessionCountMetaProcedure(t *testing.T) {
 func TestListSessionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 		sessID := caller.ID
@@ -410,6 +421,7 @@ func TestListSessionMetaProcedures(t *testing.T) {
 func TestGetSessionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 
 		caller := testClient(t, r)
 		sessID := caller.ID
@@ -450,6 +462,7 @@ func TestGetSessionMetaProcedures(t *testing.T) {
 func TestRegistrationMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		caller := testClient(t, r)
 
 		// ----- Test wamp.registration.list meta procedure -----
@@ -612,6 +625,7 @@ func TestRegistrationMetaProcedures(t *testing.T) {
 func TestSubscriptionMetaProcedures(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newTestRouter(t)
+		defer r.Close()
 		caller := testClient(t, r)
 
 		// ----- Test wamp.subscription.list meta procedure -----

@@ -11,17 +11,20 @@ import (
 )
 
 type testPeer struct {
-	in chan wamp.Message
+	in   chan wamp.Message
+	done chan struct{}
 }
 
 func newTestPeer() *testPeer {
 	return &testPeer{
-		in: make(chan wamp.Message, 1),
+		in:   make(chan wamp.Message, 1),
+		done: make(chan struct{}),
 	}
 }
 
 func (p *testPeer) Recv() <-chan wamp.Message { return p.in }
 func (p *testPeer) Send() chan<- wamp.Message { return p.in }
+func (p *testPeer) Done() <-chan struct{}     { return p.done }
 func (p *testPeer) Close()                    {}
 
 func (p *testPeer) IsLocal() bool { return true }
