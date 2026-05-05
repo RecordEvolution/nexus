@@ -208,7 +208,6 @@ func TestLocalPeerDoneIndependentPerSide(t *testing.T) {
 	}
 }
 
-
 func BenchmarkClientToRouter(b *testing.B) {
 	c, r := transport.LinkedPeers()
 
