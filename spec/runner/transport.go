@@ -25,17 +25,23 @@ var (
 	portMu sync.Mutex
 )
 
-// startRouter creates a router with one anonymous-auth realm matching the
-// plan's `realm` field. The router is closed via t.Cleanup.
-func startRouter(t *testing.T, realm string) router.Router {
+// startRouter creates a router with one realm matching the plan's
+// `realm` field. Auth is configured from the plan's optional `auth:`
+// block via buildAuthenticators; if absent, anonymous-only auth is
+// enabled (legacy behavior). The router is closed via t.Cleanup.
+func startRouter(t *testing.T, realm string, spec *AuthSpec) router.Router {
 	t.Helper()
+
+	anonOn, _, auths := buildAuthenticators(spec)
+
 	cfg := &router.Config{
 		RealmConfigs: []*router.RealmConfig{
 			{
-				URI:           wamp.URI(realm),
-				StrictURI:     false,
-				AnonymousAuth: true,
-				AllowDisclose: true,
+				URI:            wamp.URI(realm),
+				StrictURI:      false,
+				AnonymousAuth:  anonOn,
+				AllowDisclose:  true,
+				Authenticators: auths,
 			},
 		},
 	}

@@ -136,6 +136,65 @@ func matchPlaceholder(path, ph string, actual any, captures map[string]any) erro
 	return nil
 }
 
+// substituteCaptures walks a YAML-loaded list and replaces any string
+// shaped like "{{$name}}" or "{{$name:type}}" with the captured value
+// from a previous `expect` step. Used on the send side so a plan can
+// echo back ids the router assigned (e.g. yield to an INVOCATION id
+// captured from a prior INVOCATION expect).
+//
+// Returns an error if a placeholder references a name that hasn't been
+// captured yet.
+func substituteCaptures(v any, captures map[string]any) (any, error) {
+	switch x := v.(type) {
+	case string:
+		if !isPlaceholder(x) {
+			return x, nil
+		}
+		body := strings.TrimSuffix(strings.TrimPrefix(x, "{{$"), "}}")
+		name, _, _ := strings.Cut(body, ":")
+		if name == "" {
+			return nil, fmt.Errorf("send placeholder %q has no name to substitute", x)
+		}
+		val, ok := captures[name]
+		if !ok {
+			return nil, fmt.Errorf("send placeholder %q references uncaptured name", x)
+		}
+		return val, nil
+	case []any:
+		out := make([]any, len(x))
+		for i, item := range x {
+			r, err := substituteCaptures(item, captures)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = r
+		}
+		return out, nil
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			r, err := substituteCaptures(val, captures)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = r
+		}
+		return out, nil
+	case map[any]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			r, err := substituteCaptures(val, captures)
+			if err != nil {
+				return nil, err
+			}
+			out[fmt.Sprint(k)] = r
+		}
+		return out, nil
+	default:
+		return v, nil
+	}
+}
+
 // asInt accepts int, int64, float64 (YAML/JSON numeric forms) and returns
 // the int64 value.
 func asInt(v any) (int64, error) {
