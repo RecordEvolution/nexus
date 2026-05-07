@@ -1,6 +1,9 @@
 package router
 
-import "github.com/gammazero/nexus/v3/wamp"
+import (
+	"github.com/gammazero/nexus/v3/stdlog"
+	"github.com/gammazero/nexus/v3/wamp"
+)
 
 // Broker handles publish/subscribe and topic-side meta procedures
 // for a single realm. The default implementation in [broker] is the
@@ -118,3 +121,26 @@ var (
 	_ Broker = (*broker)(nil)
 	_ Dealer = (*dealer)(nil)
 )
+
+// BrokerFactory constructs the Broker for a given realm. Set it on
+// RealmConfig.BrokerFactory to swap in a custom implementation
+// (e.g. clustered, metrics-wrapped, forwarding proxy). When unset
+// the router uses the default in-process Broker.
+type BrokerFactory func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error)
+
+// DealerFactory constructs the Dealer for a given realm. Same shape
+// as BrokerFactory.
+type DealerFactory func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error)
+
+// defaultBrokerFactory builds the in-process actor-loop broker used
+// when RealmConfig.BrokerFactory is unset.
+func defaultBrokerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
+	return newBroker(logger, cfg.StrictURI, cfg.AllowDisclose, debug,
+		cfg.PublishFilterFactory, cfg.TopicEventHistoryConfigs)
+}
+
+// defaultDealerFactory builds the in-process actor-loop dealer used
+// when RealmConfig.DealerFactory is unset.
+func defaultDealerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
+	return newDealer(logger, cfg.StrictURI, cfg.AllowDisclose, debug), nil
+}

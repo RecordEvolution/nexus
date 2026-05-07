@@ -370,15 +370,24 @@ func (r *router) addRealm(config *RealmConfig) (*realm, error) {
 		return nil, errors.New("realm already exists: " + string(config.URI))
 	}
 
-	broker, err := newBroker(r.log, config.StrictURI, config.AllowDisclose, r.debug, config.PublishFilterFactory, config.TopicEventHistoryConfigs)
+	brokerFactory := config.BrokerFactory
+	if brokerFactory == nil {
+		brokerFactory = defaultBrokerFactory
+	}
+	dealerFactory := config.DealerFactory
+	if dealerFactory == nil {
+		dealerFactory = defaultDealerFactory
+	}
+
+	broker, err := brokerFactory(config, r.log, r.debug)
 	if err != nil {
 		return nil, err
 	}
-	realm, err := newRealm(
-		config,
-		broker,
-		newDealer(r.log, config.StrictURI, config.AllowDisclose, r.debug),
-		r.log, r.debug)
+	dealer, err := dealerFactory(config, r.log, r.debug)
+	if err != nil {
+		return nil, err
+	}
+	realm, err := newRealm(config, broker, dealer, r.log, r.debug)
 	if err != nil {
 		return nil, err
 	}

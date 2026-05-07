@@ -90,6 +90,16 @@ type RealmConfig struct {
 	// This value is not set via json config, but is configured when embedding
 	// nexus. A value of nil enables the default filtering.
 	PublishFilterFactory FilterFactory
+
+	// BrokerFactory, if set, supplies a custom Broker implementation for
+	// this realm instead of the default in-process broker. Useful for
+	// clustered backends, metrics-wrapping decorators, or forwarding
+	// proxies. nil means use the default.
+	BrokerFactory BrokerFactory
+
+	// DealerFactory, if set, supplies a custom Dealer implementation for
+	// this realm instead of the default in-process dealer.
+	DealerFactory DealerFactory
 }
 
 type TopicEventHistoryConfig struct {
