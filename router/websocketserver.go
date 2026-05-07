@@ -103,6 +103,24 @@ type WebsocketServer struct {
 	// client. The default is defaultOutQueueSize.
 	OutQueueSize int
 
+	// TCPSendBufferBytes, when > 0, sets SO_SNDBUF on the underlying TCP
+	// connection right after the WebSocket upgrade. Larger send buffers
+	// reduce the rate at which kernel back-pressure stalls per-subscriber
+	// send goroutines under high fan-out load. 0 = use OS default.
+	TCPSendBufferBytes int
+
+	// TCPRecvBufferBytes, when > 0, sets SO_RCVBUF on the underlying TCP
+	// connection. 0 = use OS default.
+	TCPRecvBufferBytes int
+
+	// EnableNagle, when true, leaves TCP_NODELAY off (i.e. enables
+	// Nagle's algorithm). The kernel will then coalesce small successive
+	// writes into fewer TCP packets — fewer syscalls, fewer packets, but
+	// added latency (typically tens of ms per write). Off by default;
+	// enable only for high-throughput broker fan-out scenarios where
+	// publish-to-subscribe latency budget tolerates the extra delay.
+	EnableNagle bool
+
 	router    Router
 	protocols map[string]protocol
 }
@@ -353,7 +371,38 @@ func (s *WebsocketServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.applyTCPOptions(conn.UnderlyingConn())
+
 	s.handleWebsocket(conn, wamp.Dict{"auth": authDict})
+}
+
+// applyTCPOptions sets the SO_SNDBUF / SO_RCVBUF / TCP_NODELAY socket
+// options on the upgraded connection's underlying TCP conn, per the
+// fields on WebsocketServer. Errors are logged and ignored so a setsockopt
+// failure (e.g. on a non-TCP transport) doesn't tear down the session.
+func (s *WebsocketServer) applyTCPOptions(c net.Conn) {
+	if c == nil {
+		return
+	}
+	tcp, ok := c.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	if s.TCPSendBufferBytes > 0 {
+		if err := tcp.SetWriteBuffer(s.TCPSendBufferBytes); err != nil {
+			s.router.Logger().Println("SetWriteBuffer:", err)
+		}
+	}
+	if s.TCPRecvBufferBytes > 0 {
+		if err := tcp.SetReadBuffer(s.TCPRecvBufferBytes); err != nil {
+			s.router.Logger().Println("SetReadBuffer:", err)
+		}
+	}
+	if s.EnableNagle {
+		if err := tcp.SetNoDelay(false); err != nil {
+			s.router.Logger().Println("SetNoDelay(false):", err)
+		}
+	}
 }
 
 // addProtocol registers a serializer for protocol and payload type.
