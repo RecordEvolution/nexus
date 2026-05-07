@@ -39,8 +39,8 @@ type testamentBucket struct {
 type realm struct {
 	uri wamp.URI
 
-	broker *broker
-	dealer *dealer
+	broker Broker
+	dealer Dealer
 
 	authorizer Authorizer
 
@@ -94,7 +94,7 @@ var (
 )
 
 // newRealm creates a new realm with the given RealmConfig, broker and dealer.
-func newRealm(config *RealmConfig, broker *broker, dealer *dealer, logger stdlog.StdLog, debug bool) (*realm, error) {
+func newRealm(config *RealmConfig, broker Broker, dealer Dealer, logger stdlog.StdLog, debug bool) (*realm, error) {
 	if !config.URI.ValidURI(config.StrictURI, "") {
 		return nil, fmt.Errorf(
 			"invalid realm URI %v (URI strict checking %v)", config.URI, config.StrictURI)
