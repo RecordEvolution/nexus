@@ -185,6 +185,30 @@ func (rs *rawSocketPeer) Done() <-chan struct{} { return rs.closed }
 
 func (rs *rawSocketPeer) IsLocal() bool { return false }
 
+// Serializer returns the wire serializer ID. Satisfies serialize.Provider
+// for use by the broker fan-out cache.
+func (rs *rawSocketPeer) Serializer() serialize.Serialization {
+	return rs.serializer.ID()
+}
+
+// encodeOutbound returns the wire bytes for an outbound message.
+// Same contract as websocketPeer.encodeOutbound — see the doc there.
+func (rs *rawSocketPeer) encodeOutbound(msg wamp.Message) ([]byte, error) {
+	if shared, ok := msg.(*wamp.SharedMessage); ok {
+		serID := rs.serializer.ID()
+		b, hit := shared.Cached(int(serID))
+		if !hit {
+			panic(fmt.Sprintf(
+				"wamp.SharedMessage cache miss for serID=%d (msg=%T): "+
+					"the broker must pre-encode for every serializer in the "+
+					"subscription/registration group before fan-out",
+				serID, shared.Inner))
+		}
+		return b, nil
+	}
+	return rs.serializer.Serialize(msg)
+}
+
 // Close closes the rawsocket peer. Idempotent and safe to call
 // concurrently with Send — the wr channel is intentionally NOT
 // closed (only sendHandler reads from it and exits cleanly via
@@ -225,7 +249,7 @@ sendLoop:
 	for {
 		select {
 		case msg := <-rs.wr:
-			b, err := rs.serializer.Serialize(msg)
+			b, err := rs.encodeOutbound(msg)
 			if err != nil {
 				rs.log.Print(err)
 				continue sendLoop

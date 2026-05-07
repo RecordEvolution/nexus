@@ -20,8 +20,20 @@ func init() {
 // serializing and deserializing cbor encoded payloads.
 type CBORSerializer struct{}
 
-// Serialize encodes a Message into a cbor payload.
+// ID returns the CBOR Serialization constant.
+func (s *CBORSerializer) ID() Serialization { return CBOR }
+
+// Serialize encodes a Message into a cbor payload. Recognizes
+// *wamp.SharedMessage's per-serializer cache; see jsonserializer.go.
 func (s *CBORSerializer) Serialize(msg wamp.Message) ([]byte, error) {
+	if shared, ok := msg.(*wamp.SharedMessage); ok {
+		if b, hit := shared.Cached(int(CBOR)); hit {
+			return b, nil
+		}
+		var b []byte
+		err := codec.NewEncoderBytes(&b, ch).Encode(msgToList(shared.Inner))
+		return b, err
+	}
 	var b []byte
 	err := codec.NewEncoderBytes(&b, ch).Encode(msgToList(msg))
 	return b, err

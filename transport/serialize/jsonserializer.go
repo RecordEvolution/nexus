@@ -21,8 +21,25 @@ func init() {
 // serializing and deserializing json encoded payloads.
 type JSONSerializer struct{}
 
+// ID returns the JSON Serialization constant.
+func (s *JSONSerializer) ID() Serialization { return JSON }
+
 // Serialize encodes a Message into a json payload.
+//
+// Recognizes *wamp.SharedMessage and returns the pre-encoded bytes
+// from its cache when present — eliminates duplicate JSON encoding
+// across high-fan-out broker dispatches.
 func (s *JSONSerializer) Serialize(msg wamp.Message) ([]byte, error) {
+	if shared, ok := msg.(*wamp.SharedMessage); ok {
+		if b, hit := shared.Cached(int(JSON)); hit {
+			return b, nil
+		}
+		// Fallback for the rare case the broker didn't pre-encode for
+		// this format — encode the inner message directly.
+		var b []byte
+		err := codec.NewEncoderBytes(&b, jh).Encode(msgToList(shared.Inner))
+		return b, err
+	}
 	var b []byte
 	err := codec.NewEncoderBytes(&b, jh).Encode(msgToList(msg))
 	return b, err

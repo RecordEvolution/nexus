@@ -18,6 +18,7 @@ import (
 	"github.com/gammazero/nexus/v3/wamp"
 )
 
+
 // DialFunc is an alternate Dial function for the websocket dialer.
 type DialFunc func(network, addr string) (net.Conn, error)
 
@@ -246,6 +247,44 @@ func (w *websocketPeer) Send() chan<- wamp.Message { return w.wr }
 
 func (w *websocketPeer) IsLocal() bool { return false }
 
+// Serializer returns the wire serializer ID. Satisfies serialize.Provider
+// so the broker fan-out cache can identify the wire format this peer
+// expects without per-message type assertion against every concrete
+// serializer.
+func (w *websocketPeer) Serializer() serialize.Serialization {
+	return w.serializer.ID()
+}
+
+// encodeOutbound returns the wire bytes for an outbound message.
+//
+// Hot-path contract: when msg is a *wamp.SharedMessage (broker fan-out
+// of an EVENT or INVOCATION across many peers), the broker is the sole
+// encoder and MUST have populated the cache for every active serializer
+// in the subscription/registration group at fan-out time. A cache miss
+// here means the broker contract was violated — panic loudly so the bug
+// surfaces immediately, instead of silently falling back to encoding
+// (which is what hid an earlier wiring regression).
+//
+// Per-session control messages (WELCOME, ABORT, GOODBYE, PUBLISHED,
+// SUBSCRIBED, UNSUBSCRIBED, REGISTERED, RESULT, ERROR, …) arrive as
+// concrete *wamp.<Type> values rather than SharedMessage; they're
+// rare relative to fan-out and stay on the per-session encoder path.
+func (w *websocketPeer) encodeOutbound(msg wamp.Message) ([]byte, error) {
+	if shared, ok := msg.(*wamp.SharedMessage); ok {
+		serID := w.serializer.ID()
+		b, hit := shared.Cached(int(serID))
+		if !hit {
+			panic(fmt.Sprintf(
+				"wamp.SharedMessage cache miss for serID=%d (msg=%T): "+
+					"the broker must pre-encode for every serializer in the "+
+					"subscription/registration group before fan-out",
+				serID, shared.Inner))
+		}
+		return b, nil
+	}
+	return w.serializer.Serialize(msg)
+}
+
 // Close closes the websocket peer. Idempotent and safe to call
 // concurrently with Send — the wr channel is intentionally NOT
 // closed (only sendHandler reads from it and exits cleanly via
@@ -306,7 +345,7 @@ sendLoop:
 	for {
 		select {
 		case msg := <-w.wr:
-			b, err := w.serializer.Serialize(msg)
+			b, err := w.encodeOutbound(msg)
 			if err != nil {
 				w.log.Print(err)
 				continue sendLoop
@@ -378,7 +417,7 @@ recvLoop:
 	for {
 		select {
 		case msg := <-w.wr:
-			b, err := w.serializer.Serialize(msg)
+			b, err := w.encodeOutbound(msg)
 			if err != nil {
 				w.log.Print(err)
 				continue recvLoop

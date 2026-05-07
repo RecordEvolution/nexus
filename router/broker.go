@@ -7,6 +7,7 @@ import (
 
 	"github.com/gammazero/deque"
 	"github.com/gammazero/nexus/v3/stdlog"
+	"github.com/gammazero/nexus/v3/transport/serialize"
 	"github.com/gammazero/nexus/v3/wamp"
 )
 
@@ -35,6 +36,32 @@ type subscription struct {
 	match       string   // match policy
 	created     string   // when subscription was created
 	subscribers map[*wamp.Session]struct{}
+
+	// serializers is a refcounted set of wire-serializer formats in
+	// active use across this subscription's subscribers (network peers
+	// only — local peers don't serialize and aren't tracked). Used by
+	// the fan-out cache to know which formats to pre-encode without
+	// scanning every subscriber per event. Updated on subscribe /
+	// unsubscribe under the broker actor goroutine, so unsynchronized
+	// access is safe.
+	serializers map[serialize.Serialization]int
+
+	// Refcounts of non-local subscribers split by their declared
+	// publisher_identification feature flag (WAMP §14.4.4). The broker
+	// uses these at fan-out time to decide which event variant(s) to
+	// pre-encode:
+	//
+	//   - subsWithPubIdent > 0      → may need disclosed variant
+	//                                 (only when disclose is also true)
+	//   - subsWithoutPubIdent > 0   → needs plain variant
+	//
+	// In the common case where every subscriber advertises the feature
+	// AND the publisher requested disclosure, only the disclosed
+	// variant is built. Local subscribers are excluded from both
+	// counters because they always go through the per-subscriber clone
+	// path (mutation isolation).
+	subsWithPubIdent    int
+	subsWithoutPubIdent int
 }
 
 // storedEvent is a wrapper around wamp event message with timestamp to be used
@@ -372,17 +399,115 @@ func (b *broker) syncPublish(pub *wamp.Session, msg *wamp.Publish, pubID wamp.ID
 
 func newSubscription(id wamp.ID, subscriber *wamp.Session, topic wamp.URI, match string) *subscription {
 	subscribers := map[*wamp.Session]struct{}{}
+	serializers := map[serialize.Serialization]int{}
+	var subsWithPubIdent, subsWithoutPubIdent int
 	if subscriber != nil {
 		subscribers[subscriber] = struct{}{}
+		if serID, ok := sessionSerializer(subscriber); ok {
+			serializers[serID]++
+			if subscriber.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent) {
+				subsWithPubIdent++
+			} else {
+				subsWithoutPubIdent++
+			}
+		}
 	}
 
 	return &subscription{
-		id:          id,
-		topic:       topic,
-		match:       match,
-		created:     wamp.NowISO8601(),
-		subscribers: subscribers,
+		id:                  id,
+		topic:               topic,
+		match:               match,
+		created:             wamp.NowISO8601(),
+		subscribers:         subscribers,
+		serializers:         serializers,
+		subsWithPubIdent:    subsWithPubIdent,
+		subsWithoutPubIdent: subsWithoutPubIdent,
 	}
+}
+
+// sessionSerializer returns the wire serializer ID of sess's peer if
+// the peer satisfies serialize.Provider (i.e. is a serializing
+// network peer). Returns false for local in-process peers, which
+// don't go through a serializer on the wire and therefore don't
+// participate in the fan-out byte cache.
+func sessionSerializer(sess *wamp.Session) (serialize.Serialization, bool) {
+	if sess == nil || sess.Peer == nil {
+		return 0, false
+	}
+	sp, ok := sess.Peer.(serialize.Provider)
+	if !ok {
+		return 0, false
+	}
+	return sp.Serializer(), true
+}
+
+// Stateless singleton serializers used by the fan-out byte cache.
+// Each Serializer is a struct with no fields, so a single instance
+// per type can be reused across all encode calls.
+//
+//nolint:gochecknoglobals
+var (
+	jsonEncoder    = &serialize.JSONSerializer{}
+	msgpackEncoder = &serialize.MessagePackSerializer{}
+	cborEncoder    = &serialize.CBORSerializer{}
+)
+
+// serializerForID maps a Serialization ID to its concrete encoder.
+// Returns (nil, false) for AUTO or unknown values — the caller skips
+// pre-encoding for that format (cache miss → fallback to per-session
+// encode of the inner message).
+func serializerForID(id serialize.Serialization) (serialize.Serializer, bool) {
+	switch id {
+	case serialize.JSON:
+		return jsonEncoder, true
+	case serialize.MSGPACK:
+		return msgpackEncoder, true
+	case serialize.CBOR:
+		return cborEncoder, true
+	}
+	return nil, false
+}
+
+// addSubscriber records a new session in sub.subscribers and bumps the
+// serializer + publisher-identification refcounts. Idempotent: if the
+// session is already in the set, no change.
+func (sub *subscription) addSubscriber(sess *wamp.Session) {
+	if _, already := sub.subscribers[sess]; already {
+		return
+	}
+	sub.subscribers[sess] = struct{}{}
+	serID, isNet := sessionSerializer(sess)
+	if isNet {
+		sub.serializers[serID]++
+		if sess.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent) {
+			sub.subsWithPubIdent++
+		} else {
+			sub.subsWithoutPubIdent++
+		}
+	}
+}
+
+// removeSubscriber drops sess from sub.subscribers and decrements the
+// serializer + publisher-identification refcounts. Returns true if the
+// session was in the set.
+func (sub *subscription) removeSubscriber(sess *wamp.Session) bool {
+	if _, ok := sub.subscribers[sess]; !ok {
+		return false
+	}
+	delete(sub.subscribers, sess)
+	serID, isNet := sessionSerializer(sess)
+	if isNet {
+		sub.serializers[serID]--
+		if sub.serializers[serID] <= 0 {
+			delete(sub.serializers, serID)
+		}
+		if sess.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent) {
+			sub.subsWithPubIdent--
+		} else {
+			sub.subsWithoutPubIdent--
+		}
+	}
+	return true
 }
 
 func (b *broker) syncSaveEvent(eventStore *historyStore, pub *wamp.Publish, event *wamp.Event) {
@@ -452,8 +577,9 @@ func (b *broker) syncSubscribe(subscriber *wamp.Session, msg *wamp.Subscribe, ma
 			})
 			return
 		}
-		// Add subscriber to existing subscription.
-		sub.subscribers[subscriber] = struct{}{}
+		// Add subscriber to existing subscription (refcounts the
+		// serializer for the fan-out byte cache).
+		sub.addSubscriber(subscriber)
 	}
 
 	// Add the subscription ID to the set of subscriptions for the subscriber.
@@ -508,8 +634,9 @@ func (b *broker) syncUnsubscribe(subscriber *wamp.Session, msg *wamp.Unsubscribe
 		return
 	}
 
-	// Remove subscribed session from subscription.
-	delete(sub.subscribers, subscriber)
+	// Remove subscribed session from subscription (refcounts down the
+	// serializer for the fan-out byte cache).
+	sub.removeSubscriber(subscriber)
 
 	// If no more subscribers on this subscription, delete subscription and
 	// send on_delete meta event.
@@ -563,8 +690,9 @@ func (b *broker) syncRemoveSession(subscriber *wamp.Session) {
 		if !ok {
 			continue
 		}
-		// Remove subscribed session from subscription.
-		delete(sub.subscribers, subscriber)
+		// Remove subscribed session from subscription (refcounts down
+		// the serializer for the fan-out byte cache).
+		sub.removeSubscriber(subscriber)
 
 		// If no more subscribers on this subscription.
 		if len(sub.subscribers) == 0 {
@@ -611,27 +739,81 @@ func (b *broker) syncPubEvent(pub *wamp.Session, msg *wamp.Publish, pubID wamp.I
 	args := msg.Arguments
 	argsKw := msg.ArgumentsKw
 
-	// Shared event used for every NON-LOCAL subscriber that does not
-	// trigger per-subscriber disclosure. Pointer is reused across
-	// recipients whose send path serializes to bytes — those goroutines
-	// only READ the struct (encode + write), never mutate, so concurrent
-	// reads of the embedded args / argsKw / details are safe.
+	// Build only the event variants the subscriber group actually
+	// needs (WAMP §14.4.4). Subscribers refcount their interest in
+	// publisher identity at subscribe time:
 	//
-	// Local subscribers (in-process Go clients) read the struct directly
-	// in their event handlers and may mutate it (TestEventContentSafety
-	// pins this contract). Sharing across local subscribers would let
-	// one subscriber's mutation become visible to another. So local
-	// subscribers always get a per-subscriber Event with deep-copied
-	// args / argsKw / details — same isolation prepareEvent gave before
-	// this optimization.
-	sharedEvent := &wamp.Event{
+	//   - plain variant     — needed when at least one non-local
+	//                         subscriber lacks FeaturePubIdent, OR
+	//                         when disclose is false (every subscriber
+	//                         gets the plain event).
+	//   - disclosed variant — needed when disclose is true AND at
+	//                         least one non-local subscriber declared
+	//                         FeaturePubIdent.
+	//
+	// Local subscribers always go through the per-clone path below
+	// for mutation isolation; they don't influence variant selection.
+	needPlain := !disclose || sub.subsWithoutPubIdent > 0
+	needDisclosed := disclose && sub.subsWithPubIdent > 0
+
+	// plainEvent is always constructed — it's cheap (struct + shared
+	// args/argsKw/details references) and serves as the default
+	// fallback for the rare per-subscriber paths that don't pick a
+	// pre-encoded variant (e.g. local clones, or a non-Provider peer
+	// that isn't tracked in sub.serializers). Pre-encoding into the
+	// shared cache only happens when needPlain is true.
+	plainEvent := &wamp.Event{
 		Publication:  pubID,
 		Subscription: sub.id,
 		Arguments:    args,
 		ArgumentsKw:  argsKw,
 		Details:      baseDetails,
 	}
+	var disclosedEvent *wamp.Event
+	if needDisclosed {
+		discDetails := make(wamp.Dict, len(baseDetails)+3)
+		maps.Copy(discDetails, baseDetails)
+		disclosePublisher(pub, discDetails)
+		disclosedEvent = &wamp.Event{
+			Publication:  pubID,
+			Subscription: sub.id,
+			Arguments:    args,
+			ArgumentsKw:  argsKw,
+			Details:      discDetails,
+		}
+	}
 
+	// Pre-encode each needed variant ONCE per active wire serializer.
+	// Single-goroutine work in broker.run, so no contention. Per-
+	// session send goroutines downstream find a populated cache and
+	// skip encoding entirely.
+	var sharedPlain, sharedDisclosed *wamp.SharedMessage
+	if len(sub.serializers) > 0 {
+		if needPlain {
+			sharedPlain = wamp.NewSharedMessage(plainEvent)
+			for serID := range sub.serializers {
+				ser, ok := serializerForID(serID)
+				if !ok {
+					continue
+				}
+				if b, err := ser.Serialize(plainEvent); err == nil {
+					sharedPlain.Store(int(serID), b)
+				}
+			}
+		}
+		if disclosedEvent != nil {
+			sharedDisclosed = wamp.NewSharedMessage(disclosedEvent)
+			for serID := range sub.serializers {
+				ser, ok := serializerForID(serID)
+				if !ok {
+					continue
+				}
+				if b, err := ser.Serialize(disclosedEvent); err == nil {
+					sharedDisclosed.Store(int(serID), b)
+				}
+			}
+		}
+	}
 	for subscriber := range sub.subscribers {
 		// Do not send event to publisher.
 		if subscriber == pub && excludePublisher {
@@ -653,19 +835,20 @@ func (b *broker) syncPubEvent(pub *wamp.Session, msg *wamp.Publish, pubID wamp.I
 			}
 		}
 
-		needPerSub := subscriber.IsLocal() ||
-			(disclose && subscriber.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent))
+		wantsDisclosure := disclose &&
+			subscriber.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent)
 
-		var event *wamp.Event
-		if !needPerSub {
-			event = sharedEvent
-		} else {
-			// Per-subscriber copy: isolates mutation from the local-handler
-			// path, and carries the publisher-identity disclosure when
-			// that's enabled for this subscriber.
+		var msgOut wamp.Message
+		switch {
+		case subscriber.IsLocal():
+			// Local subscribers (in-process Go clients, meta sessions,
+			// tests) read the *wamp.Event struct directly in their
+			// handlers and may mutate it (TestEventContentSafety pins
+			// this contract). They get a per-subscriber clone with
+			// deep-copied maps/slices for mutation isolation.
 			perSubDetails := make(wamp.Dict, len(baseDetails)+3)
 			maps.Copy(perSubDetails, baseDetails)
-			if disclose && subscriber.HasFeature(wamp.RoleSubscriber, wamp.FeaturePubIdent) {
+			if wantsDisclosure {
 				disclosePublisher(pub, perSubDetails)
 			}
 			perSubArgs := args
@@ -678,16 +861,33 @@ func (b *broker) syncPubEvent(pub *wamp.Session, msg *wamp.Publish, pubID wamp.I
 				perSubArgsKw = make(wamp.Dict, len(argsKw))
 				maps.Copy(perSubArgsKw, argsKw)
 			}
-			event = &wamp.Event{
+			msgOut = &wamp.Event{
 				Publication:  pubID,
 				Subscription: sub.id,
 				Arguments:    perSubArgs,
 				ArgumentsKw:  perSubArgsKw,
 				Details:      perSubDetails,
 			}
+
+		case wantsDisclosure && sharedDisclosed != nil:
+			msgOut = sharedDisclosed
+
+		case sharedPlain != nil:
+			msgOut = sharedPlain
+
+		default:
+			// No populated cache (rare race between subscribe refcount
+			// update and a fan-out, or unsupported serializer ID).
+			// Fall back to the bare event so the per-session goroutine
+			// encodes it on the spot.
+			if wantsDisclosure && disclosedEvent != nil {
+				msgOut = disclosedEvent
+			} else {
+				msgOut = plainEvent
+			}
 		}
 
-		b.trySend(subscriber, event)
+		b.trySend(subscriber, msgOut)
 	}
 
 	// If event history store is enabled for subscription let's save event

@@ -27,10 +27,28 @@ type Serialization int
 // Serializer is the interface implemented by an object that can serialize and
 // deserialize WAMP messages
 type Serializer interface {
+	// ID returns the Serialization constant identifying this
+	// serializer's wire format. Used by consumers (e.g. the broker
+	// fan-out cache) that need to identify which serializer a peer
+	// uses without type-asserting against every concrete impl.
+	ID() Serialization
+
 	Serialize(wamp.Message) ([]byte, error)
 	Deserialize([]byte) (wamp.Message, error)
 	SerializeDataItem(item any) ([]byte, error)
 	DeserializeDataItem([]byte, any) error
+}
+
+// Provider is an optional interface that wamp.Peer implementations may
+// satisfy to expose their wire serializer ID. The broker uses this to
+// pre-encode events for the formats actually in use across a
+// subscription group, eliminating per-subscriber duplicate encoding.
+//
+// Peers that don't serialize on the wire (e.g. local in-process peers)
+// should NOT implement Provider — their absence signals "send the raw
+// message struct, not a pre-encoded wrapper."
+type Provider interface {
+	Serializer() Serialization
 }
 
 // listToMsg takes a list of values from a WAMP message and populates the

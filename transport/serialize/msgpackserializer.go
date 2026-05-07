@@ -48,8 +48,20 @@ func MsgpackRegisterExtension(rt reflect.Type, tag byte, encode func(reflect.Val
 // serializing and deserializing msgpack encoded payloads.
 type MessagePackSerializer struct{}
 
-// Serialize encodes a Message into a msgpack payload.
+// ID returns the MSGPACK Serialization constant.
+func (s *MessagePackSerializer) ID() Serialization { return MSGPACK }
+
+// Serialize encodes a Message into a msgpack payload. Recognizes
+// *wamp.SharedMessage's per-serializer cache; see jsonserializer.go.
 func (s *MessagePackSerializer) Serialize(msg wamp.Message) ([]byte, error) {
+	if shared, ok := msg.(*wamp.SharedMessage); ok {
+		if b, hit := shared.Cached(int(MSGPACK)); hit {
+			return b, nil
+		}
+		var b []byte
+		err := codec.NewEncoderBytes(&b, mh).Encode(msgToList(shared.Inner))
+		return b, err
+	}
 	var b []byte
 	err := codec.NewEncoderBytes(&b, mh).Encode(msgToList(msg))
 	return b, err
