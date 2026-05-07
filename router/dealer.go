@@ -182,7 +182,7 @@ func newDealer(logger stdlog.StdLog, strictURI, allowDisclose, debug bool) *deal
 }
 
 // setMetaPeer sets the client that the dealer uses to publish meta events.
-func (d *dealer) setMetaPeer(metaPeer wamp.Peer) {
+func (d *dealer) SetMetaPeer(metaPeer wamp.Peer) {
 	d.actionChan <- func() {
 		d.metaPeer = metaPeer
 	}
@@ -190,7 +190,7 @@ func (d *dealer) setMetaPeer(metaPeer wamp.Peer) {
 
 // role returns the role information for the "dealer" role. The data returned
 // is suitable for use as broker role info in a WELCOME message.
-func (d *dealer) role() wamp.Dict {
+func (d *dealer) Role() wamp.Dict {
 	return dealerRole
 }
 
@@ -199,7 +199,7 @@ func (d *dealer) role() wamp.Dict {
 // If the shared_registration feature is supported, and if allowed by the
 // invocation policy, multiple callees may register to handle the same
 // procedure.
-func (d *dealer) register(callee *wamp.Session, msg *wamp.Register) {
+func (d *dealer) Register(callee *wamp.Session, msg *wamp.Register) {
 	if callee == nil || msg == nil {
 		panic("dealer.Register with nil session or message")
 	}
@@ -273,7 +273,7 @@ func (d *dealer) register(callee *wamp.Session, msg *wamp.Register) {
 }
 
 // unregister removes a remote procedure previously registered by the callee.
-func (d *dealer) unregister(callee *wamp.Session, msg *wamp.Unregister) {
+func (d *dealer) Unregister(callee *wamp.Session, msg *wamp.Unregister) {
 	if callee == nil || msg == nil {
 		panic("dealer.Unregister with nil session or message")
 	}
@@ -291,7 +291,7 @@ func (d *dealer) unregister(callee *wamp.Session, msg *wamp.Unregister) {
 }
 
 // call invokes a registered remote procedure.
-func (d *dealer) call(caller *wamp.Session, msg *wamp.Call) {
+func (d *dealer) Call(caller *wamp.Session, msg *wamp.Call) {
 	if caller == nil || msg == nil {
 		panic("dealer.Call with nil session or message")
 	}
@@ -318,7 +318,7 @@ func (d *dealer) call(caller *wamp.Session, msg *wamp.Call) {
 // invocation or interrupt from the callee is discarded when received.
 //
 // If the callee does not support call canceling, then behavior is "skip".
-func (d *dealer) cancel(caller *wamp.Session, msg *wamp.Cancel) {
+func (d *dealer) Cancel(caller *wamp.Session, msg *wamp.Cancel) {
 	if caller == nil || msg == nil {
 		panic("dealer.Cancel with nil session or message")
 	}
@@ -359,7 +359,7 @@ func (d *dealer) cancel(caller *wamp.Session, msg *wamp.Cancel) {
 // YIELD. The retry loop runs on a fresh goroutine. Without this split,
 // a single unresponsive caller would freeze all further communication
 // for an otherwise healthy callee — see gammazero/nexus#324.
-func (d *dealer) yield(callee *wamp.Session, msg *wamp.Yield) {
+func (d *dealer) Yield(callee *wamp.Session, msg *wamp.Yield) {
 	if callee == nil || msg == nil {
 		panic("dealer.Yield with nil session or message")
 	}
@@ -500,7 +500,7 @@ func (d *dealer) tryDrainOneYield(callee *wamp.Session, invkReqID requestID) (ke
 }
 
 // error handles an invocation error returned by the callee.
-func (d *dealer) error(callee *wamp.Session, msg *wamp.Error) {
+func (d *dealer) Error(callee *wamp.Session, msg *wamp.Error) {
 	if msg == nil {
 		panic("dealer.Error with nil message")
 	}
@@ -514,7 +514,7 @@ func (d *dealer) error(callee *wamp.Session, msg *wamp.Error) {
 // router. If there are any registrations for this session
 // wamp.registration.on_unregister and wamp.registration.on_delete meta events
 // are published for each.
-func (d *dealer) removeSession(sess *wamp.Session) {
+func (d *dealer) RemoveSession(sess *wamp.Session) {
 	if sess == nil {
 		// No session specified, no session removed.
 		return
@@ -536,7 +536,7 @@ func (d *dealer) removeSession(sess *wamp.Session) {
 }
 
 // close stops the dealer, letting already queued actions finish.
-func (d *dealer) close() {
+func (d *dealer) Close() {
 	// Signal background goroutines (e.g. yield-retry workers) before
 	// closing actionChan, so they exit via the closing channel rather
 	// than racing on a send-on-closed-channel panic.
@@ -1513,7 +1513,7 @@ func (d *dealer) syncDelCalleeReg(callee *wamp.Session, regID wamp.ID) (bool, er
 // ----- Meta Procedure Handlers -----
 
 // regList retrieves registration IDs listed according to match policies.
-func (d *dealer) regList(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegList(msg *wamp.Invocation) wamp.Message {
 	var exactRegs, pfxRegs, wcRegs []wamp.ID
 	sync := make(chan struct{})
 	d.actionChan <- func() {
@@ -1542,7 +1542,7 @@ func (d *dealer) regList(msg *wamp.Invocation) wamp.Message {
 
 // regLookup obtains the registration (if any) managing a procedure, according
 // to some match policy.
-func (d *dealer) regLookup(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegLookup(msg *wamp.Invocation) wamp.Message {
 	var regID wamp.ID
 	if len(msg.Arguments) != 0 {
 		if procedure, ok := wamp.AsURI(msg.Arguments[0]); ok {
@@ -1580,7 +1580,7 @@ func (d *dealer) regLookup(msg *wamp.Invocation) wamp.Message {
 }
 
 // regMatch obtains the registration best matching a given procedure URI.
-func (d *dealer) regMatch(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegMatch(msg *wamp.Invocation) wamp.Message {
 	var regID wamp.ID
 	if len(msg.Arguments) != 0 {
 		if procedure, ok := wamp.AsURI(msg.Arguments[0]); ok {
@@ -1602,7 +1602,7 @@ func (d *dealer) regMatch(msg *wamp.Invocation) wamp.Message {
 }
 
 // regGet retrieves information on a particular registration.
-func (d *dealer) regGet(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegGet(msg *wamp.Invocation) wamp.Message {
 	var dict wamp.Dict
 	if len(msg.Arguments) != 0 {
 		if regID, ok := wamp.AsID(msg.Arguments[0]); ok {
@@ -1638,7 +1638,7 @@ func (d *dealer) regGet(msg *wamp.Invocation) wamp.Message {
 
 // regListCallees retrieves a list of session IDs for sessions currently
 // attached to the registration.
-func (d *dealer) regListCallees(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegListCallees(msg *wamp.Invocation) wamp.Message {
 	var calleeIDs []wamp.ID
 	if len(msg.Arguments) != 0 {
 		if regID, ok := wamp.AsID(msg.Arguments[0]); ok {
@@ -1671,7 +1671,7 @@ func (d *dealer) regListCallees(msg *wamp.Invocation) wamp.Message {
 
 // regCountCallees obtains the number of sessions currently attached to the
 // registration.
-func (d *dealer) regCountCallees(msg *wamp.Invocation) wamp.Message {
+func (d *dealer) RegCountCallees(msg *wamp.Invocation) wamp.Message {
 	var count int
 	var ok bool
 	if len(msg.Arguments) != 0 {
