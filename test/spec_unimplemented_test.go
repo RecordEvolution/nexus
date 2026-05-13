@@ -36,10 +36,6 @@ func TestSpecUnimplementedTopicReflection(t *testing.T) {
 	t.Skip("pending: topic_reflection — wamp.reflection.topic.* not implemented")
 }
 
-func TestSpecUnimplementedForceReregister(t *testing.T) {
-	t.Skip("pending: force_reregister — option not honored by dealer.Register")
-}
-
 func TestSpecUnimplementedBatchedWSTransport(t *testing.T) {
 	t.Skip("pending: batched WebSocket transport (wamp.2.json.batched / msgpack.batched)")
 }
