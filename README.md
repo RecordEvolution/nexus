@@ -170,6 +170,7 @@ The currently maintained version of this module is 3.x. Earlier major versions a
 | registration_meta_procedures | Yes       |
 | pattern_based_registration   | Yes       |
 | shared_registration          | Yes       |
+| force_reregister             | Yes       |
 | sharded_registration         | No        |
 | registration_revocation      | No        |
 | procedure_reflection         | No        |
