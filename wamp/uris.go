@@ -243,6 +243,11 @@ const (
 	// or destroyed.
 	MetaProcSessionFlushTestaments = URI("wamp.session.flush_testaments")
 
+	// List the Testaments currently registered in the realm, across all
+	// sessions and both scopes. Non-standard IronFlock extension for
+	// operational introspection (the WAMP spec only defines add/flush).
+	MetaProcSessionListTestaments = URI("wamp.session.list_testaments")
+
 	// -- Nexus Specific URIs for internal use
 	InternalProgressiveOmitResult = URI("progressive.call.omit_result")
 )

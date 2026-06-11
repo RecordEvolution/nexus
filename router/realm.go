@@ -294,6 +294,7 @@ func (r *realm) setupMetaProcedures() {
 	// Register to handle testament meta procedures.
 	r.registerMetaProcedure(wamp.MetaProcSessionAddTestament, r.testamentAdd)
 	r.registerMetaProcedure(wamp.MetaProcSessionFlushTestaments, r.testamentFlush)
+	r.registerMetaProcedure(wamp.MetaProcSessionListTestaments, r.testamentList)
 }
 
 // createMetaSession creates and starts a session that runs in this realm, and
@@ -1238,6 +1239,53 @@ func (r *realm) testamentFlush(msg *wamp.Invocation) wamp.Message {
 		r.testaments[caller] = testaments
 	}
 	return &wamp.Yield{Request: msg.Request}
+}
+
+// testamentList returns a snapshot of every testament currently registered in
+// this realm, across all sessions and both scopes. The WAMP spec offers no way
+// to enumerate testaments (only add/flush), so this is an IronFlock extension
+// for operational introspection — "which live sessions have a testament armed,
+// and on what topic". Each entry is a dict:
+//
+//	{"session": <id>, "authid": <authid>, "authrole": <authrole>,
+//	 "scope": "destroyed"|"detached", "topic": <uri>}
+//
+// authid/authrole are looked up from the still-attached session (testaments are
+// removed when a session leaves, so the owner is normally present). The list is
+// returned as positional arg[0], mirroring wamp.session.list.
+func (r *realm) testamentList(msg *wamp.Invocation) wamp.Message {
+	retChan := make(chan []wamp.Dict)
+	r.actionChan <- func() {
+		var out []wamp.Dict
+		appendScope := func(sid wamp.ID, scope string, ts []testament) {
+			if len(ts) == 0 {
+				return
+			}
+			var authid, authrole interface{}
+			if sess, ok := r.clients[sid]; ok {
+				sess.Lock()
+				authid = sess.Details["authid"]
+				authrole = sess.Details["authrole"]
+				sess.Unlock()
+			}
+			for i := range ts {
+				out = append(out, wamp.Dict{
+					"session":  sid,
+					"authid":   authid,
+					"authrole": authrole,
+					"scope":    scope,
+					"topic":    ts[i].topic,
+				})
+			}
+		}
+		for sid, bucket := range r.testaments {
+			appendScope(sid, destroyedScope, bucket.destroyed)
+			appendScope(sid, detachedScope, bucket.detached)
+		}
+		retChan <- out
+	}
+	list := <-retChan
+	return &wamp.Yield{Request: msg.Request, Arguments: wamp.List{list}}
 }
 
 // cleanSessionDetails returns a dictionary that only contains allowed session
