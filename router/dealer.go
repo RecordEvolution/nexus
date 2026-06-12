@@ -626,7 +626,7 @@ func (d *dealer) syncRegister(callee *wamp.Session, msg *wamp.Register, match, i
 		}
 		if !wampURI && d.regObserver != nil {
 			// A previously unregistered procedure gained its first callee.
-			d.regObserver(true, msg.Procedure, observerMatch(match), invokePolicy)
+			d.regObserver(true, msg.Procedure, observerMatch(match), observerInvoke(invokePolicy))
 		}
 	} else {
 		// There is an existing registration(s) for this procedure. See if
@@ -1519,7 +1519,7 @@ func (d *dealer) syncEvictRegistration(reg *registration, wampURI bool) []*wamp.
 	if !wampURI && d.regObserver != nil {
 		// force_reregister evicted the registration; the replacement
 		// fires its own added=true on the create path.
-		d.regObserver(false, reg.procedure, reg.match, reg.policy)
+		d.regObserver(false, reg.procedure, observerMatch(reg.match), observerInvoke(reg.policy))
 	}
 	if !wampURI && d.metaPeer != nil && len(reg.callees) > 0 {
 		// on_delete uses the last callee's session ID, mirroring the order
@@ -1587,7 +1587,7 @@ func (d *dealer) syncDelCalleeReg(callee *wamp.Session, regID wamp.ID) (bool, er
 		if d.regObserver != nil && !strings.HasPrefix(string(reg.procedure), "wamp.") {
 			// The last callee left: the procedure is no longer registered
 			// on this realm.
-			d.regObserver(false, reg.procedure, observerMatch(reg.match), reg.policy)
+			d.regObserver(false, reg.procedure, observerMatch(reg.match), observerInvoke(reg.policy))
 		}
 		return true, nil
 	}

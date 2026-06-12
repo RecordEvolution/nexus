@@ -178,3 +178,43 @@ func TestRegistrationObserverLifecycle(t *testing.T) {
 	require.Equal(t, obsEvent{added: false, uri: "obs.proc", match: wamp.MatchExact,
 		invoke: wamp.InvokeRoundRobin}, ev)
 }
+
+func TestRegistrationObserverForceReregister(t *testing.T) {
+	const realmURI = wamp.URI("nexus.test.observer.evict")
+	events := make(chan obsEvent, 16)
+
+	r, err := NewRouter(&Config{
+		RealmConfigs: []*RealmConfig{{
+			URI:           realmURI,
+			AnonymousAuth: true,
+			RegistrationObserver: func(added bool, proc wamp.URI, match, invoke string) {
+				events <- obsEvent{added: added, uri: proc, match: match, invoke: invoke}
+			},
+		}},
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { r.Close() })
+
+	callee1 := testClientInRealm(t, r, realmURI)
+	callee2 := testClientInRealm(t, r, realmURI)
+
+	callee1.Send() <- &wamp.Register{Request: wamp.GlobalID(), Procedure: "evict.proc"}
+	_, ok := recvMsg(t, callee1).(*wamp.Registered)
+	require.True(t, ok)
+	ev := obsRecv(t, events)
+	require.True(t, ev.added)
+
+	// force_reregister evicts the existing registration and installs the
+	// new one: the observer must see a normalized delete then an add —
+	// never the internal empty-string match.
+	callee2.Send() <- &wamp.Register{Request: wamp.GlobalID(), Procedure: "evict.proc",
+		Options: wamp.Dict{wamp.OptForceReregister: true}}
+	_, ok = recvMsg(t, callee2).(*wamp.Registered)
+	require.True(t, ok)
+	ev = obsRecv(t, events)
+	require.Equal(t, obsEvent{added: false, uri: "evict.proc", match: wamp.MatchExact,
+		invoke: wamp.InvokeSingle}, ev)
+	ev = obsRecv(t, events)
+	require.True(t, ev.added)
+	require.Equal(t, wamp.MatchExact, ev.match)
+}
