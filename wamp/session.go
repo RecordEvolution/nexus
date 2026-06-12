@@ -220,3 +220,28 @@ func (s *Session) IsNewRecvID(id ID) bool {
 	// legitimate new id within the allowed wraparound.
 	return (MaxID - (last - id)) < deltaID
 }
+
+// RolesDict returns the session's declared roles and features in wire
+// shape — {role: {"features": {feature: true}}} — suitable for carrying
+// a session's capabilities to another router (federation) or for
+// introspection. The result round-trips through role parsing: a session
+// constructed with it answers HasRole/HasFeature identically. Returns
+// nil when no roles were declared.
+func (s *Session) RolesDict() Dict {
+	if s.roles == nil {
+		return nil
+	}
+	out := make(Dict, len(s.roles))
+	for role, features := range s.roles {
+		roleDict := Dict{}
+		if len(features) > 0 {
+			feats := make(Dict, len(features))
+			for feature := range features {
+				feats[feature] = true
+			}
+			roleDict["features"] = feats
+		}
+		out[role] = roleDict
+	}
+	return out
+}
