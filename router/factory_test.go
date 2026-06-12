@@ -2,6 +2,7 @@ package router //nolint:testpackage
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -65,6 +66,80 @@ func TestRealmConfigBrokerAndDealerFactoriesHonored(t *testing.T) {
 	require.True(t, brokerProbe.called)
 	require.NotNil(t, dealerProbe, "DealerFactory was not called")
 	require.True(t, dealerProbe.called)
+}
+
+// TestNewDefaultBrokerAndDealerCarryTraffic verifies the exported
+// default constructors produce fully functional implementations when
+// used from a decorating factory — the seam downstream consumers use to
+// wrap (not replace) the in-process broker/dealer. A pub/sub round trip
+// proves the decorated broker dispatches, and a registration round trip
+// proves the decorated dealer does.
+func TestNewDefaultBrokerAndDealerCarryTraffic(t *testing.T) {
+	const realmURI = wamp.URI("nexus.test.factory.exported")
+
+	r, err := NewRouter(&Config{
+		RealmConfigs: []*RealmConfig{
+			{
+				URI:           realmURI,
+				AnonymousAuth: true,
+				BrokerFactory: func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
+					inner, err := NewDefaultBroker(cfg, logger, debug)
+					if err != nil {
+						return nil, err
+					}
+					return &brokerFactoryProbe{Broker: inner, called: true}, nil
+				},
+				DealerFactory: func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
+					inner, err := NewDefaultDealer(cfg, logger, debug)
+					if err != nil {
+						return nil, err
+					}
+					return &dealerFactoryProbe{Dealer: inner, called: true}, nil
+				},
+			},
+		},
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { r.Close() })
+
+	sub := testClientInRealm(t, r, realmURI)
+	pub := testClientInRealm(t, r, realmURI)
+
+	// recv bounds every wait so a regression fails the test instead of
+	// hanging it.
+	recv := func(sess *wamp.Session) wamp.Message {
+		t.Helper()
+		select {
+		case msg := <-sess.Recv():
+			return msg
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for router message")
+			return nil
+		}
+	}
+
+	// Pub/sub through the decorated broker.
+	subID := wamp.GlobalID()
+	sub.Send() <- &wamp.Subscribe{Request: subID, Topic: "test.topic"}
+	msg := recv(sub)
+	subscribed, ok := msg.(*wamp.Subscribed)
+	require.True(t, ok, "expected SUBSCRIBED, got %T", msg)
+	require.Equal(t, subID, subscribed.Request)
+
+	pub.Send() <- &wamp.Publish{Request: wamp.GlobalID(), Topic: "test.topic",
+		Arguments: wamp.List{"hello"}}
+	msg = recv(sub)
+	event, ok := msg.(*wamp.Event)
+	require.True(t, ok, "expected EVENT, got %T", msg)
+	require.Equal(t, wamp.List{"hello"}, event.Arguments)
+
+	// Registration through the decorated dealer.
+	regID := wamp.GlobalID()
+	sub.Send() <- &wamp.Register{Request: regID, Procedure: "test.proc"}
+	msg = recv(sub)
+	registered, ok := msg.(*wamp.Registered)
+	require.True(t, ok, "expected REGISTERED, got %T", msg)
+	require.Equal(t, regID, registered.Request)
 }
 
 // TestRealmConfigUnsetFactoriesUseDefaults exercises the fallback path

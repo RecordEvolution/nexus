@@ -11,14 +11,20 @@ import (
 // clustered Raft-backed broker, a forwarding proxy) can be supplied
 // per-realm via RealmConfig once the factory hook lands.
 //
-// All methods are called from the realm's inbound dispatch loop on
-// a single goroutine, so implementations may assume serial entry
-// from the realm. Implementations that fan out to internal worker
-// goroutines must serialize their own state.
+// Methods are called concurrently from multiple router goroutines:
+// the per-session message handler goroutines (one per attached
+// session, plus the realm's meta session), the realm's session
+// lifecycle paths (RemoveSession on disconnect), and the realm actor
+// during construction and shutdown (PreInitEventHistoryTopics, Role,
+// Close). Implementations must be safe for concurrent entry. The
+// default implementation serializes its state by running all
+// mutations on a single internal actor goroutine.
 type Broker interface {
 	// Publish dispatches a PUBLISH message from a session to all
-	// matching subscribers. The pub session may be nil for trusted
-	// internal publications (e.g. meta events).
+	// matching subscribers. The pub session must not be nil; trusted
+	// internal publications (e.g. meta events) are published from the
+	// realm's meta session, and callers integrating external sources
+	// must construct a session carrying the publisher's identity.
 	Publish(pub *wamp.Session, msg *wamp.Publish)
 
 	// Subscribe registers the session for the topic in msg, with
@@ -61,8 +67,8 @@ type Broker interface {
 }
 
 // Dealer handles register/call/yield and procedure-side meta
-// procedures for a single realm. Same single-goroutine entry contract
-// as [Broker].
+// procedures for a single realm. Same concurrency contract as
+// [Broker]: concurrent entry from per-session handler goroutines.
 type Dealer interface {
 	// Register registers the session as a callee for the procedure
 	// in msg. Replies with REGISTERED or ERROR.
@@ -143,4 +149,17 @@ func defaultBrokerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (B
 // when RealmConfig.DealerFactory is unset.
 func defaultDealerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
 	return newDealer(logger, cfg.StrictURI, cfg.AllowDisclose, debug), nil
+}
+
+// NewDefaultBroker constructs the same in-process broker the router uses
+// when RealmConfig.BrokerFactory is unset. Custom factories that decorate
+// the default implementation (rather than replace it) wrap the value
+// returned here.
+func NewDefaultBroker(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
+	return defaultBrokerFactory(cfg, logger, debug)
+}
+
+// NewDefaultDealer is the dealer counterpart of [NewDefaultBroker].
+func NewDefaultDealer(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
+	return defaultDealerFactory(cfg, logger, debug)
 }
