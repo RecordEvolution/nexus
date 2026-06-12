@@ -117,10 +117,11 @@ type broker struct {
 	log           stdlog.StdLog
 	debug         bool
 	filterFactory FilterFactory
+	subObserver   SubscriptionObserver
 }
 
 // newBroker returns a new default broker implementation instance.
-func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publishFilter FilterFactory, evntCfgs []*TopicEventHistoryConfig) (*broker, error) { //nolint:lll
+func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publishFilter FilterFactory, evntCfgs []*TopicEventHistoryConfig, subObserver SubscriptionObserver) (*broker, error) { //nolint:lll
 	if logger == nil {
 		panic("logger is nil")
 	}
@@ -150,6 +151,7 @@ func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publi
 		log:           logger,
 		debug:         debug,
 		filterFactory: publishFilter,
+		subObserver:   subObserver,
 	}
 	err := b.PreInitEventHistoryTopics(evntCfgs)
 	// if broker fails initialize event history store we just log it, the
@@ -560,6 +562,13 @@ func (b *broker) syncInitSubscription(topic wamp.URI, match string, subscriber *
 	}
 	b.subscriptions[sub.id] = sub
 
+	if !existingSub && b.subObserver != nil {
+		// A previously unsubscribed (topic, match) pair gained its first
+		// subscription — including event-history subscriptions created
+		// at realm construction.
+		b.subObserver(true, topic, observerMatch(match))
+	}
+
 	return sub, existingSub
 }
 
@@ -616,6 +625,12 @@ func (b *broker) syncDelSubscription(sub *subscription) {
 		delete(b.wcTopicSubscription, sub.topic)
 	default:
 		delete(b.topicSubscription, sub.topic)
+	}
+
+	if b.subObserver != nil {
+		// The last subscriber left: the (topic, match) pair is no longer
+		// subscribed on this realm.
+		b.subObserver(false, sub.topic, observerMatch(sub.match))
 	}
 }
 

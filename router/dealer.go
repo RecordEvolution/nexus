@@ -137,7 +137,8 @@ type dealer struct {
 	strictURI     bool
 	allowDisclose bool
 
-	metaPeer wamp.Peer
+	metaPeer    wamp.Peer
+	regObserver RegistrationObserver
 
 	log   stdlog.StdLog
 	debug bool
@@ -149,8 +150,9 @@ type dealer struct {
 // This serialization is limited to the work of determining the message's
 // destination, and then the message is handed off to the next goroutine,
 // typically the receiving client's send handler.
-func newDealer(logger stdlog.StdLog, strictURI, allowDisclose, debug bool) *dealer {
+func newDealer(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, regObserver RegistrationObserver) *dealer {
 	d := &dealer{
+		regObserver:   regObserver,
 		procRegMap:    map[wamp.URI]*registration{},
 		pfxProcRegMap: map[wamp.URI]*registration{},
 		wcProcRegMap:  map[wamp.URI]*registration{},
@@ -621,6 +623,10 @@ func (d *dealer) syncRegister(callee *wamp.Session, msg *wamp.Register, match, i
 				Topic:     wamp.MetaEventRegOnCreate,
 				Arguments: wamp.List{callee.ID, details},
 			})
+		}
+		if !wampURI && d.regObserver != nil {
+			// A previously unregistered procedure gained its first callee.
+			d.regObserver(true, msg.Procedure, observerMatch(match), invokePolicy)
 		}
 	} else {
 		// There is an existing registration(s) for this procedure. See if
@@ -1510,6 +1516,11 @@ func (d *dealer) syncEvictRegistration(reg *registration, wampURI bool) []*wamp.
 	case wamp.MatchWildcard:
 		delete(d.wcProcRegMap, reg.procedure)
 	}
+	if !wampURI && d.regObserver != nil {
+		// force_reregister evicted the registration; the replacement
+		// fires its own added=true on the create path.
+		d.regObserver(false, reg.procedure, reg.match, reg.policy)
+	}
 	if !wampURI && d.metaPeer != nil && len(reg.callees) > 0 {
 		// on_delete uses the last callee's session ID, mirroring the order
 		// upstream uses elsewhere (see syncRemoveSession).
@@ -1572,6 +1583,11 @@ func (d *dealer) syncDelCalleeReg(callee *wamp.Session, regID wamp.ID) (bool, er
 		if d.debug {
 			d.log.Printf("Deleted registration %v for procedure %v", regID,
 				reg.procedure)
+		}
+		if d.regObserver != nil && !strings.HasPrefix(string(reg.procedure), "wamp.") {
+			// The last callee left: the procedure is no longer registered
+			// on this realm.
+			d.regObserver(false, reg.procedure, observerMatch(reg.match), reg.policy)
 		}
 		return true, nil
 	}

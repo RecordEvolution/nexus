@@ -27,7 +27,7 @@ func TestDealerTrySendDoesNotPanicOnClosedSession(t *testing.T) {
 }
 
 func newTestDealer(t *testing.T) (*dealer, wamp.Peer) {
-	d := newDealer(logger, false, true, debug)
+	d := newDealer(logger, false, true, debug, nil)
 	metaClient, rtr := transport.LinkedPeers()
 	d.SetMetaPeer(rtr)
 	t.Cleanup(func() {
@@ -1189,7 +1189,7 @@ func TestCallerIdentification(t *testing.T) {
 
 func TestWrongYielder(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		dealer := newDealer(logger, false, true, debug)
+		dealer := newDealer(logger, false, true, debug, nil)
 		t.Cleanup(func() {
 			dealer.Close()
 		})
@@ -1434,7 +1434,7 @@ func TestDealerDrainExitsOnInvocationCancel(t *testing.T) {
 //
 // Coverage: drainPendingYields' <-d.closing branch.
 func TestDealerDrainExitsOnDealerClose(t *testing.T) {
-	d := newDealer(logger, false, true, debug)
+	d := newDealer(logger, false, true, debug, nil)
 	metaClient, rtr := transport.LinkedPeers()
 	d.SetMetaPeer(rtr)
 

@@ -100,6 +100,17 @@ type RealmConfig struct {
 	// DealerFactory, if set, supplies a custom Dealer implementation for
 	// this realm instead of the default in-process dealer.
 	DealerFactory DealerFactory
+
+	// SubscriptionObserver, if set, is notified by the default broker
+	// whenever the realm's set of subscribed (topic, match) pairs
+	// changes. See [SubscriptionObserver] for the calling contract.
+	// Decorating BrokerFactory implementations may set this before
+	// constructing the default broker via NewDefaultBroker.
+	SubscriptionObserver SubscriptionObserver
+
+	// RegistrationObserver is the dealer counterpart of
+	// SubscriptionObserver.
+	RegistrationObserver RegistrationObserver
 }
 
 type TopicEventHistoryConfig struct {
