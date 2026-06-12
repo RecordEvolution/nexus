@@ -144,6 +144,11 @@ type SubscriptionObserver func(added bool, topic wamp.URI, match string)
 // invocation policy. Registrations for wamp.* URIs (the realm meta API)
 // are not reported, mirroring the registration meta events. Same
 // calling contract as SubscriptionObserver.
+//
+// Neither observer fires retractions when the broker/dealer itself is
+// closed (realm shutdown or teardown+recreate): consumers must scope
+// the interest they derive to the broker/dealer instance and discard
+// it wholesale when that instance is replaced.
 type RegistrationObserver func(added bool, procedure wamp.URI, match, invoke string)
 
 // BrokerFactory constructs the Broker for a given realm. Set it on
@@ -184,12 +189,24 @@ func NewDefaultDealer(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Deale
 	return defaultDealerFactory(cfg, logger, debug)
 }
 
-// observerMatch normalizes the internal match representation (empty
-// string means exact) for observer callbacks, so consumers always see
-// exact|prefix|wildcard.
+// observerMatch normalizes the internal match representation for
+// observer callbacks, so consumers always see exact|prefix|wildcard:
+// the broker and dealer treat anything that is not prefix or wildcard
+// as exact, so the observer reports it that way too.
 func observerMatch(match string) string {
-	if match == "" {
+	switch match {
+	case wamp.MatchPrefix, wamp.MatchWildcard:
+		return match
+	default:
 		return wamp.MatchExact
 	}
-	return match
+}
+
+// observerInvoke normalizes the invocation policy for observer
+// callbacks: an unset policy means single-callee (the WAMP default).
+func observerInvoke(invoke string) string {
+	if invoke == "" {
+		return wamp.InvokeSingle
+	}
+	return invoke
 }
