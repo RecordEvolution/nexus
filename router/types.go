@@ -147,3 +147,16 @@ func defaultBrokerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (B
 func defaultDealerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
 	return newDealer(logger, cfg.StrictURI, cfg.AllowDisclose, debug), nil
 }
+
+// NewDefaultBroker constructs the same in-process broker the router uses
+// when RealmConfig.BrokerFactory is unset. Custom factories that decorate
+// the default implementation (rather than replace it) wrap the value
+// returned here.
+func NewDefaultBroker(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
+	return defaultBrokerFactory(cfg, logger, debug)
+}
+
+// NewDefaultDealer is the dealer counterpart of [NewDefaultBroker].
+func NewDefaultDealer(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
+	return defaultDealerFactory(cfg, logger, debug)
+}
