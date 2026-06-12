@@ -44,3 +44,24 @@ func TestIsNewRecvIDBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestRolesDictRoundTrips(t *testing.T) {
+	greet := Dict{"roles": Dict{
+		"publisher":  Dict{"features": Dict{"publisher_exclusion": true, "off_feature": false}},
+		"subscriber": Dict{},
+	}}
+	s := NewSession(nil, 1, nil, greet)
+	clone := NewSession(nil, 2, nil, Dict{"roles": s.RolesDict()})
+	if !clone.HasRole("publisher") || !clone.HasRole("subscriber") {
+		t.Fatalf("roles lost in round trip: %v", s.RolesDict())
+	}
+	if !clone.HasFeature("publisher", "publisher_exclusion") {
+		t.Error("feature lost in round trip")
+	}
+	if clone.HasFeature("publisher", "off_feature") {
+		t.Error("disabled feature resurrected")
+	}
+	if NewSession(nil, 3, nil, nil).RolesDict() != nil {
+		t.Error("no roles must return nil")
+	}
+}
