@@ -71,7 +71,7 @@ func TestBrokerTrySendDoesNotPanicOnClosedSession(t *testing.T) {
 }
 
 func newTestBroker(t *testing.T, eventCfgs []*TopicEventHistoryConfig) *broker {
-	b, err := newBroker(logger, false, true, debug, nil, eventCfgs)
+	b, err := newBroker(logger, false, true, debug, nil, eventCfgs, nil)
 	require.NoError(t, err, "Can not initialize broker")
 	t.Cleanup(func() {
 		b.Close()

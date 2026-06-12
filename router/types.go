@@ -128,6 +128,24 @@ var (
 	_ Dealer = (*dealer)(nil)
 )
 
+// SubscriptionObserver is notified whenever the realm's set of
+// subscribed (topic, match) pairs changes: added=true when a
+// subscription is created for a previously unsubscribed (topic, match)
+// — including event-history subscriptions initialized at realm
+// construction — and added=false when the subscription is deleted
+// after its last subscriber left. Called from the broker's internal
+// actor goroutine: implementations must be fast, must not block, and
+// must not call back into the Broker. Useful for federation layers
+// (forwarding interest), metrics, and cache invalidation.
+type SubscriptionObserver func(added bool, topic wamp.URI, match string)
+
+// RegistrationObserver is the dealer counterpart of
+// [SubscriptionObserver], reporting procedure registrations with their
+// invocation policy. Registrations for wamp.* URIs (the realm meta API)
+// are not reported, mirroring the registration meta events. Same
+// calling contract as SubscriptionObserver.
+type RegistrationObserver func(added bool, procedure wamp.URI, match, invoke string)
+
 // BrokerFactory constructs the Broker for a given realm. Set it on
 // RealmConfig.BrokerFactory to swap in a custom implementation
 // (e.g. clustered, metrics-wrapped, forwarding proxy). When unset
@@ -142,13 +160,15 @@ type DealerFactory func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dea
 // when RealmConfig.BrokerFactory is unset.
 func defaultBrokerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
 	return newBroker(logger, cfg.StrictURI, cfg.AllowDisclose, debug,
-		cfg.PublishFilterFactory, cfg.TopicEventHistoryConfigs)
+		cfg.PublishFilterFactory, cfg.TopicEventHistoryConfigs,
+		cfg.SubscriptionObserver)
 }
 
 // defaultDealerFactory builds the in-process actor-loop dealer used
 // when RealmConfig.DealerFactory is unset.
 func defaultDealerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
-	return newDealer(logger, cfg.StrictURI, cfg.AllowDisclose, debug), nil
+	return newDealer(logger, cfg.StrictURI, cfg.AllowDisclose, debug,
+		cfg.RegistrationObserver), nil
 }
 
 // NewDefaultBroker constructs the same in-process broker the router uses
@@ -162,4 +182,14 @@ func NewDefaultBroker(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broke
 // NewDefaultDealer is the dealer counterpart of [NewDefaultBroker].
 func NewDefaultDealer(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dealer, error) {
 	return defaultDealerFactory(cfg, logger, debug)
+}
+
+// observerMatch normalizes the internal match representation (empty
+// string means exact) for observer callbacks, so consumers always see
+// exact|prefix|wildcard.
+func observerMatch(match string) string {
+	if match == "" {
+		return wamp.MatchExact
+	}
+	return match
 }
