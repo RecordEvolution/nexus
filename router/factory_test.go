@@ -2,6 +2,7 @@ package router //nolint:testpackage
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -104,17 +105,30 @@ func TestNewDefaultBrokerAndDealerCarryTraffic(t *testing.T) {
 	sub := testClientInRealm(t, r, realmURI)
 	pub := testClientInRealm(t, r, realmURI)
 
+	// recv bounds every wait so a regression fails the test instead of
+	// hanging it.
+	recv := func(sess *wamp.Session) wamp.Message {
+		t.Helper()
+		select {
+		case msg := <-sess.Recv():
+			return msg
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for router message")
+			return nil
+		}
+	}
+
 	// Pub/sub through the decorated broker.
 	subID := wamp.GlobalID()
 	sub.Send() <- &wamp.Subscribe{Request: subID, Topic: "test.topic"}
-	msg := <-sub.Recv()
+	msg := recv(sub)
 	subscribed, ok := msg.(*wamp.Subscribed)
 	require.True(t, ok, "expected SUBSCRIBED, got %T", msg)
 	require.Equal(t, subID, subscribed.Request)
 
 	pub.Send() <- &wamp.Publish{Request: wamp.GlobalID(), Topic: "test.topic",
 		Arguments: wamp.List{"hello"}}
-	msg = <-sub.Recv()
+	msg = recv(sub)
 	event, ok := msg.(*wamp.Event)
 	require.True(t, ok, "expected EVENT, got %T", msg)
 	require.Equal(t, wamp.List{"hello"}, event.Arguments)
@@ -122,7 +136,7 @@ func TestNewDefaultBrokerAndDealerCarryTraffic(t *testing.T) {
 	// Registration through the decorated dealer.
 	regID := wamp.GlobalID()
 	sub.Send() <- &wamp.Register{Request: regID, Procedure: "test.proc"}
-	msg = <-sub.Recv()
+	msg = recv(sub)
 	registered, ok := msg.(*wamp.Registered)
 	require.True(t, ok, "expected REGISTERED, got %T", msg)
 	require.Equal(t, regID, registered.Request)

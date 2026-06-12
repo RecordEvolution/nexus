@@ -11,11 +11,14 @@ import (
 // clustered Raft-backed broker, a forwarding proxy) can be supplied
 // per-realm via RealmConfig once the factory hook lands.
 //
-// Methods are called concurrently from the per-session message
-// handler goroutines (one per attached session, plus the realm's
-// meta session), so implementations must be safe for concurrent
-// entry. The default implementation serializes its state by running
-// all mutations on a single internal actor goroutine.
+// Methods are called concurrently from multiple router goroutines:
+// the per-session message handler goroutines (one per attached
+// session, plus the realm's meta session), the realm's session
+// lifecycle paths (RemoveSession on disconnect), and the realm actor
+// during construction and shutdown (PreInitEventHistoryTopics, Role,
+// Close). Implementations must be safe for concurrent entry. The
+// default implementation serializes its state by running all
+// mutations on a single internal actor goroutine.
 type Broker interface {
 	// Publish dispatches a PUBLISH message from a session to all
 	// matching subscribers. The pub session must not be nil; trusted
