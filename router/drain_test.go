@@ -82,3 +82,24 @@ func TestRouterDrainEmptyRealm(t *testing.T) {
 	t.Cleanup(func() { r.Close() })
 	r.Drain() // must not panic or hang with zero sessions
 }
+
+// TestRouterDrainClosesIgnoringClientPeer simulates a client that
+// receives the system_shutdown GOODBYE but keeps its connection open
+// (does not close its peer). close() must reap that peer so its
+// transport goroutines do not leak.
+func TestRouterDrainClosesIgnoringClientPeer(t *testing.T) {
+	r := newTestRouter(t)
+	c := testClient(t, r)
+
+	r.Drain()
+	msg, err := wamp.RecvTimeout(c, time.Second)
+	require.NoError(t, err)
+	_, ok := msg.(*wamp.Goodbye)
+	require.True(t, ok, "expected GOODBYE, got %T", msg)
+
+	// The "client" deliberately does not close its peer. Closing the
+	// router must close the drained-but-open peer.
+	r.Close()
+	_, err = wamp.RecvTimeout(c, 2*time.Second)
+	require.Error(t, err, "drained client peer not closed by Close(): recv still open")
+}

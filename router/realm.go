@@ -69,6 +69,11 @@ type realm struct {
 	closed    bool
 	draining  bool
 	closeLock sync.Mutex
+	// drained holds sessions kicked by drain(). Their handlers exit with
+	// shutdown=true and so do not close their own peers (reconnect
+	// model); close() closes any still open, so a client that received
+	// the GOODBYE but kept its connection cannot leak its peer goroutines.
+	drained []*wamp.Session
 
 	log   stdlog.StdLog
 	debug bool
@@ -220,10 +225,13 @@ func (r *realm) drain() {
 	}
 	r.draining = true
 	// Kick the current clients atomically inside the realm actor, so the
-	// set kicked is exactly the set present (no races with on_join).
+	// set kicked is exactly the set present (no races with on_join), and
+	// remember them so close() can reap any peer whose client kept its
+	// connection open after the GOODBYE.
 	ch := make(chan struct{})
 	r.actionChan <- func() {
 		for _, c := range r.clients {
+			r.drained = append(r.drained, c)
 			c.EndRecv(shutdownGoodbye)
 		}
 		close(ch)
@@ -281,6 +289,13 @@ func (r *realm) close() {
 	// released its references; the forwarder-based localPeer needs
 	// an explicit Close on each side).
 	for _, c := range pendingClose {
+		c.Close()
+	}
+	// Close peers of sessions kicked by a prior drain() but left open for
+	// reconnect. Close is idempotent (closeOnce), so clients that already
+	// disconnected are unaffected; clients that ignored the GOODBYE have
+	// their peer goroutines reaped here.
+	for _, c := range r.drained {
 		c.Close()
 	}
 	r.metaPeer.Close()
