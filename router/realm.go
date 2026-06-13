@@ -67,6 +67,7 @@ type realm struct {
 	metaDone    chan struct{}
 
 	closed    bool
+	draining  bool
 	closeLock sync.Mutex
 
 	log   stdlog.StdLog
@@ -197,6 +198,40 @@ func (r *realm) run() {
 // This staging is also the foundation for a future drain primitive
 // needed for cluster-rolling-update support: stages 1-2 plus a soft
 // "no new sessions" gate without proceeding to stage 4.
+// drain gracefully sheds the realm's client sessions without shutting
+// the realm down: it sets a soft gate so no new sessions are admitted,
+// then kicks every current client with GOODBYE wamp.close.system_shutdown
+// so reconnect-based clients re-establish on another node. Unlike close,
+// it does NOT wait for handlers or stop the meta session, broker, or
+// dealer — the realm stays fully functional so in-flight RPC/event
+// forwarding (e.g. a clustering layer's relayed work) and meta
+// procedures keep working until close is called. Idempotent; a later
+// close still runs fully.
+//
+// Client peers are intentionally not closed here: a reconnecting client
+// drops its own connection (the transport then reaps the peer), which is
+// the whole point of reconnect-based draining. Any client that ignores
+// the GOODBYE is torn down by the eventual close.
+func (r *realm) drain() {
+	r.closeLock.Lock()
+	if r.closed || r.draining {
+		r.closeLock.Unlock()
+		return
+	}
+	r.draining = true
+	// Kick the current clients atomically inside the realm actor, so the
+	// set kicked is exactly the set present (no races with on_join).
+	ch := make(chan struct{})
+	r.actionChan <- func() {
+		for _, c := range r.clients {
+			c.EndRecv(shutdownGoodbye)
+		}
+		close(ch)
+	}
+	<-ch
+	r.closeLock.Unlock()
+}
+
 func (r *realm) close() {
 	// closeLock is held in mutual exclusion with the router starting any
 	// new session handlers for this realm.
@@ -427,7 +462,7 @@ func (r *realm) handleSession(sess *wamp.Session) error {
 	// ensures that no new session handler can start once the realm is closing,
 	// during which the realm waits for all existing session handlers to exit.
 	r.closeLock.Lock()
-	if r.closed {
+	if r.closed || r.draining {
 		r.closeLock.Unlock()
 		err := errors.New("realm closed")
 		return err
