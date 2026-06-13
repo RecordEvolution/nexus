@@ -42,6 +42,14 @@ type Router interface {
 	// RemoveRealm will attempt to remove a realm from this router.
 	RemoveRealm(wamp.URI)
 
+	// Drain gracefully sheds client sessions on every realm — each is
+	// sent GOODBYE wamp.close.system_shutdown and no new sessions are
+	// admitted — while keeping the realms, their meta sessions, brokers,
+	// and dealers running. Returns once all realms have been signalled;
+	// in-flight work continues until Close. Intended for reconnect-based
+	// rolling updates: drain, let clients reconnect elsewhere, then Close.
+	Drain()
+
 	// RouterFeatures exposes WAMP features current version provides When Nexus
 	// is used as a pluggable library sometimes it is usefully to expose WAMP
 	// features current version provides.
@@ -360,6 +368,27 @@ func (r *router) RemoveRealm(name wamp.URI) {
 		realm.close()
 		r.log.Println("Realm", name, "was removed and completed shutdown")
 	}
+}
+
+// Drain sheds client sessions on every realm without shutting the router
+// down. See [Router.Drain].
+func (r *router) Drain() {
+	// Snapshot the realms under the actor so the set is consistent with
+	// concurrent Add/RemoveRealm, then drain each outside the actor (drain
+	// blocks on each realm's own actor).
+	var realms []*realm
+	sync := make(chan struct{})
+	r.actionChan <- func() {
+		for _, rlm := range r.realms {
+			realms = append(realms, rlm)
+		}
+		close(sync)
+	}
+	<-sync
+	for _, rlm := range realms {
+		rlm.drain()
+	}
+	r.log.Println("Router drained: all realms signalled system_shutdown")
 }
 
 // addRealm attempts to create and add a realm to this router.
