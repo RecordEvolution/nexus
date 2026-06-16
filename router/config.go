@@ -111,6 +111,16 @@ type RealmConfig struct {
 	// RegistrationObserver is the dealer counterpart of
 	// SubscriptionObserver.
 	RegistrationObserver RegistrationObserver
+
+	// SubMetaSink, if set, receives every subscription meta event
+	// (on_create/on_subscribe/on_unsubscribe/on_delete) INSTEAD of the
+	// default broker publishing it to local meta-API subscribers. A
+	// decorating layer (e.g. a cluster mesh) uses this to become the
+	// sole, authoritative emitter of subscription meta events. nil
+	// means the broker emits them natively. See [SubMetaSink].
+	// Decorating BrokerFactory implementations may set this before
+	// constructing the default broker via NewDefaultBroker.
+	SubMetaSink SubMetaSink
 }
 
 type TopicEventHistoryConfig struct {

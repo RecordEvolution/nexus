@@ -151,6 +151,36 @@ type SubscriptionObserver func(added bool, topic wamp.URI, match string)
 // it wholesale when that instance is replaced.
 type RegistrationObserver func(added bool, procedure wamp.URI, match, invoke string)
 
+// SubMetaEvent describes one subscription meta event (the
+// wamp.subscription.on_* family) delivered to a [SubMetaSink].
+type SubMetaEvent struct {
+	// Kind is the meta-event topic that fired: one of
+	// wamp.MetaEventSubOnCreate, wamp.MetaEventSubOnSubscribe,
+	// wamp.MetaEventSubOnUnsubscribe, or wamp.MetaEventSubOnDelete.
+	Kind wamp.URI
+	// Session is the session whose (un)subscribe triggered the event.
+	Session wamp.ID
+	// Subscription is the affected subscription ID.
+	Subscription wamp.ID
+	// Topic and Match are the subscription's (topic, match) pair, with
+	// Match normalized to exact|prefix|wildcard (as for
+	// [SubscriptionObserver]).
+	Topic wamp.URI
+	Match string
+	// Created is the subscription's creation timestamp, set only for the
+	// on_create event.
+	Created string
+}
+
+// SubMetaSink, when set on RealmConfig, receives every subscription
+// meta event INSTEAD of the default broker publishing it to local
+// meta-API subscribers, letting a decorating layer (e.g. a cluster
+// mesh) become the sole, authoritative emitter of these events. Called
+// from the broker's internal actor goroutine: implementations must be
+// fast, must not block, and must not call back into the Broker (publish
+// from a separate goroutine). When nil the broker emits natively.
+type SubMetaSink func(SubMetaEvent)
+
 // BrokerFactory constructs the Broker for a given realm. Set it on
 // RealmConfig.BrokerFactory to swap in a custom implementation
 // (e.g. clustered, metrics-wrapped, forwarding proxy). When unset
@@ -166,7 +196,7 @@ type DealerFactory func(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Dea
 func defaultBrokerFactory(cfg *RealmConfig, logger stdlog.StdLog, debug bool) (Broker, error) {
 	return newBroker(logger, cfg.StrictURI, cfg.AllowDisclose, debug,
 		cfg.PublishFilterFactory, cfg.TopicEventHistoryConfigs,
-		cfg.SubscriptionObserver)
+		cfg.SubscriptionObserver, cfg.SubMetaSink)
 }
 
 // defaultDealerFactory builds the in-process actor-loop dealer used

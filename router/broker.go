@@ -118,10 +118,11 @@ type broker struct {
 	debug         bool
 	filterFactory FilterFactory
 	subObserver   SubscriptionObserver
+	subMetaSink   SubMetaSink
 }
 
 // newBroker returns a new default broker implementation instance.
-func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publishFilter FilterFactory, evntCfgs []*TopicEventHistoryConfig, subObserver SubscriptionObserver) (*broker, error) { //nolint:lll
+func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publishFilter FilterFactory, evntCfgs []*TopicEventHistoryConfig, subObserver SubscriptionObserver, subMetaSink SubMetaSink) (*broker, error) { //nolint:lll
 	if logger == nil {
 		panic("logger is nil")
 	}
@@ -152,6 +153,7 @@ func newBroker(logger stdlog.StdLog, strictURI, allowDisclose, debug bool, publi
 		debug:         debug,
 		filterFactory: publishFilter,
 		subObserver:   subObserver,
+		subMetaSink:   subMetaSink,
 	}
 	err := b.PreInitEventHistoryTopics(evntCfgs)
 	// if broker fails initialize event history store we just log it, the
@@ -608,7 +610,7 @@ func (b *broker) syncSubscribe(subscriber *wamp.Session, msg *wamp.Subscribe, ma
 	}
 
 	// Publish WAMP on_subscribe meta event.
-	b.syncPubSubMeta(wamp.MetaEventSubOnSubscribe, subscriber.ID, sub.id)
+	b.syncPubSubMeta(wamp.MetaEventSubOnSubscribe, subscriber.ID, sub)
 }
 
 // syncDeleteSubscription removes the the ID->subscription mapping and removes
@@ -680,11 +682,11 @@ func (b *broker) syncUnsubscribe(subscriber *wamp.Session, msg *wamp.Unsubscribe
 	b.trySend(subscriber, &wamp.Unsubscribed{Request: msg.Request})
 
 	// Publish WAMP unsubscribe meta event.
-	b.syncPubSubMeta(wamp.MetaEventSubOnUnsubscribe, subscriber.ID, subID)
+	b.syncPubSubMeta(wamp.MetaEventSubOnUnsubscribe, subscriber.ID, sub)
 	if delLastSub {
 		// Fired when a subscription is deleted after the last session attached
 		// to it has been removed.
-		b.syncPubSubMeta(wamp.MetaEventSubOnDelete, subscriber.ID, subID)
+		b.syncPubSubMeta(wamp.MetaEventSubOnDelete, subscriber.ID, sub)
 	}
 }
 
@@ -714,7 +716,7 @@ func (b *broker) syncRemoveSession(subscriber *wamp.Session) {
 			b.syncDelSubscription(sub)
 			// Fired when a subscription is deleted after the last session
 			// attached to it has been removed.
-			b.syncPubSubMeta(wamp.MetaEventSubOnDelete, subscriber.ID, subID)
+			b.syncPubSubMeta(wamp.MetaEventSubOnDelete, subscriber.ID, sub)
 		}
 	}
 }
@@ -946,8 +948,21 @@ func (b *broker) syncPubMeta(metaTopic wamp.URI, sendMeta func(metaSub *subscrip
 }
 
 // syncPubSubMeta publishes a subscription meta event when a subscription is
-// added, removed, or deleted.
-func (b *broker) syncPubSubMeta(metaTopic wamp.URI, subSessID, subID wamp.ID) {
+// added, removed, or deleted. When a SubMetaSink is configured the event is
+// handed to it instead of being published to local meta-API subscribers, so
+// a decorating layer can be the sole emitter (see [SubMetaSink]).
+func (b *broker) syncPubSubMeta(metaTopic wamp.URI, subSessID wamp.ID, sub *subscription) {
+	if b.subMetaSink != nil {
+		b.subMetaSink(SubMetaEvent{
+			Kind:         metaTopic,
+			Session:      subSessID,
+			Subscription: sub.id,
+			Topic:        sub.topic,
+			Match:        observerMatch(sub.match),
+		})
+		return
+	}
+	subID := sub.id
 	pubID := wamp.GlobalID() // create here so that it is same for all events.
 	b.syncPubMeta(metaTopic, func(metaSub *subscription, sendTopic bool) {
 		makeEvent := func() *wamp.Event {
@@ -992,6 +1007,17 @@ func (b *broker) syncPubSubMeta(metaTopic wamp.URI, subSessID, subID wamp.ID) {
 // Fired when a subscription is created through a subscription request for a
 // topic which was previously without subscribers.
 func (b *broker) syncPubSubCreateMeta(subSessID wamp.ID, sub *subscription) {
+	if b.subMetaSink != nil {
+		b.subMetaSink(SubMetaEvent{
+			Kind:         wamp.MetaEventSubOnCreate,
+			Session:      subSessID,
+			Subscription: sub.id,
+			Topic:        sub.topic,
+			Match:        observerMatch(sub.match),
+			Created:      sub.created,
+		})
+		return
+	}
 	pubID := wamp.GlobalID() // create here so that it is same for all events.
 	b.syncPubMeta(wamp.MetaEventSubOnCreate, func(metaSub *subscription, sendTopic bool) {
 		makeEvent := func() *wamp.Event {

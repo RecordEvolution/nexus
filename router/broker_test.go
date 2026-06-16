@@ -71,12 +71,98 @@ func TestBrokerTrySendDoesNotPanicOnClosedSession(t *testing.T) {
 }
 
 func newTestBroker(t *testing.T, eventCfgs []*TopicEventHistoryConfig) *broker {
-	b, err := newBroker(logger, false, true, debug, nil, eventCfgs, nil)
+	b, err := newBroker(logger, false, true, debug, nil, eventCfgs, nil, nil)
 	require.NoError(t, err, "Can not initialize broker")
 	t.Cleanup(func() {
 		b.Close()
 	})
 	return b
+}
+
+// TestBrokerSubMetaSink verifies that when a SubMetaSink is configured, the
+// broker hands every subscription meta event to the sink with full
+// topic/match/session/subscription fidelity AND does not publish them to
+// local meta-API subscribers — letting a decorating layer (e.g. a cluster
+// mesh) be the sole emitter.
+func TestBrokerSubMetaSink(t *testing.T) {
+	events := make(chan SubMetaEvent, 16)
+	b, err := newBroker(logger, false, true, debug, nil, nil, nil,
+		func(ev SubMetaEvent) { events <- ev })
+	require.NoError(t, err, "Can not initialize broker")
+	t.Cleanup(func() { b.Close() })
+
+	readEvent := func() SubMetaEvent {
+		t.Helper()
+		select {
+		case ev := <-events:
+			return ev
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for SubMetaEvent")
+			return SubMetaEvent{}
+		}
+	}
+
+	// A native meta-API subscriber. Diverting means its OWN subscribe to the
+	// meta topic also flows to the sink (on_create + on_subscribe).
+	metaSess := wamp.NewSession(newTestPeer(), 1, nil, nil)
+	b.Subscribe(metaSess, &wamp.Subscribe{Request: 1, Topic: wamp.MetaEventSubOnSubscribe})
+	require.IsType(t, &wamp.Subscribed{}, <-metaSess.Recv())
+	require.Equal(t, wamp.MetaEventSubOnCreate, readEvent().Kind)
+	require.Equal(t, wamp.MetaEventSubOnSubscribe, readEvent().Kind)
+
+	// A normal subscriber to a regular topic: on_create then on_subscribe.
+	sess := wamp.NewSession(newTestPeer(), 2, nil, nil)
+	topic := wamp.URI("nexus.test.topic")
+	b.Subscribe(sess, &wamp.Subscribe{Request: 2, Topic: topic})
+	require.IsType(t, &wamp.Subscribed{}, <-sess.Recv())
+
+	create := readEvent()
+	require.Equal(t, wamp.MetaEventSubOnCreate, create.Kind)
+	require.Equal(t, topic, create.Topic)
+	require.Equal(t, wamp.MatchExact, create.Match, "match normalized to exact")
+	require.Equal(t, sess.ID, create.Session)
+	require.NotZero(t, create.Subscription)
+	require.NotEmpty(t, create.Created, "on_create carries the created timestamp")
+
+	subscribe := readEvent()
+	require.Equal(t, wamp.MetaEventSubOnSubscribe, subscribe.Kind)
+	require.Equal(t, topic, subscribe.Topic)
+	require.Equal(t, create.Subscription, subscribe.Subscription)
+	require.Equal(t, sess.ID, subscribe.Session)
+
+	// The native meta subscriber must have received nothing: the sink
+	// suppressed the local publish that would otherwise fire here.
+	select {
+	case msg := <-metaSess.Recv():
+		t.Fatalf("meta subscriber must get no event when sink is set, got %T", msg)
+	default:
+	}
+
+	// Explicit unsubscribe of the last subscriber: on_unsubscribe then
+	// on_delete.
+	b.Unsubscribe(sess, &wamp.Unsubscribe{Request: 3, Subscription: create.Subscription})
+	require.IsType(t, &wamp.Unsubscribed{}, <-sess.Recv())
+	require.Equal(t, wamp.MetaEventSubOnUnsubscribe, readEvent().Kind)
+	del := readEvent()
+	require.Equal(t, wamp.MetaEventSubOnDelete, del.Kind)
+	require.Equal(t, topic, del.Topic)
+	require.Equal(t, create.Subscription, del.Subscription)
+
+	// Prefix subscription: match normalized to "prefix"; session removal
+	// fires on_delete (nexus fires no on_unsubscribe on disconnect).
+	pfx := wamp.URI("nexus.pfx")
+	b.Subscribe(sess, &wamp.Subscribe{Request: 4, Topic: pfx,
+		Options: wamp.Dict{wamp.OptMatch: wamp.MatchPrefix}})
+	require.IsType(t, &wamp.Subscribed{}, <-sess.Recv())
+	pfxCreate := readEvent()
+	require.Equal(t, wamp.MetaEventSubOnCreate, pfxCreate.Kind)
+	require.Equal(t, wamp.MatchPrefix, pfxCreate.Match)
+	require.Equal(t, wamp.MetaEventSubOnSubscribe, readEvent().Kind)
+	b.RemoveSession(sess)
+	gone := readEvent()
+	require.Equal(t, wamp.MetaEventSubOnDelete, gone.Kind)
+	require.Equal(t, pfx, gone.Topic)
+	require.Equal(t, wamp.MatchPrefix, gone.Match)
 }
 
 func TestBasicSubscribe(t *testing.T) {
