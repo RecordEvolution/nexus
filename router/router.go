@@ -54,6 +54,15 @@ type Router interface {
 	// is used as a pluggable library sometimes it is usefully to expose WAMP
 	// features current version provides.
 	RouterFeatures() *wamp.Dict
+
+	// KillSessionsByAuthid closes every session on the named realm whose
+	// authid equals the given value, except the session identified by
+	// exclude (pass 0 to exclude none). It returns the number of sessions
+	// closed, or -1 if the realm is not served by this router. This is the
+	// Go-level equivalent of the wamp.session.kill_by_authid meta procedure,
+	// exposed so an embedder (e.g. the cluster mesh) can enforce
+	// single-authority identities without standing up a meta caller.
+	KillSessionsByAuthid(realm wamp.URI, authid string, exclude wamp.ID) int
 }
 
 // router is the default WAMP router implementation.
@@ -72,6 +81,26 @@ type router struct {
 
 	stopMemStats    chan struct{}
 	memStatsStopped chan struct{}
+}
+
+// KillSessionsByAuthid closes every session on realmURI whose authid matches,
+// except exclude (0 = none). Returns the kill count, or -1 if the realm is not
+// served here. The realm is located under the router actor; the kill itself
+// runs on the realm actor (killSessionsByDetail self-dispatches), so this never
+// holds both actors at once.
+func (r *router) KillSessionsByAuthid(realmURI wamp.URI, authid string, exclude wamp.ID) int {
+	var realm *realm
+	sync := make(chan struct{})
+	r.actionChan <- func() {
+		realm = r.realms[realmURI]
+		close(sync)
+	}
+	<-sync
+	if realm == nil {
+		return -1
+	}
+	return realm.killSessionsByDetail("authid", authid, wamp.CloseNormal,
+		"superseded by a newer session with the same authid", exclude)
 }
 
 // NewRouter creates a WAMP router instance.
