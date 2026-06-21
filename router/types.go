@@ -77,6 +77,17 @@ type Dealer interface {
 	// Unregister removes the registration identified in msg.
 	Unregister(callee *wamp.Session, msg *wamp.Unregister)
 
+	// EvictRegistration forcibly removes the local single-policy
+	// registration for (procedure, match) — the cross-node counterpart of
+	// the force_reregister option — sending each attached callee an
+	// unsolicited UNREGISTERED and firing on_unregister/on_delete meta
+	// events. match is the WAMP match form (exact/prefix/wildcard, with ""
+	// treated as exact). Returns true if a registration was evicted; false
+	// (no-op) when no local registration matches or it uses a shared
+	// invocation policy. Lets a clustering layer keep invoke=single
+	// effectively single mesh-wide when force_reregister lands on a peer.
+	EvictRegistration(procedure wamp.URI, match string) bool
+
 	// Call dispatches a CALL message from a caller to a registered
 	// callee, applying shared-registration policy if set.
 	Call(caller *wamp.Session, msg *wamp.Call)

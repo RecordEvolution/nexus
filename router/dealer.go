@@ -294,6 +294,49 @@ func (d *dealer) Unregister(callee *wamp.Session, msg *wamp.Unregister) {
 
 }
 
+// EvictRegistration forcibly removes the local single-policy registration for
+// (procedure, match), as if a force_reregister request had taken it over: each
+// attached callee receives an unsolicited UNREGISTERED and on_unregister/
+// on_delete meta events fire. It is the cross-node counterpart of
+// force_reregister — a clustering layer that accepted a force_reregister on one
+// node calls this on the peers holding the prior registration so invoke=single
+// stays effectively single mesh-wide. match is the WAMP match form (with ""
+// and "exact" both selecting exact-match). Returns false (no-op) for a wamp.*
+// procedure, when no local registration matches, or when the matched
+// registration uses a shared (multi-callee) invocation policy.
+func (d *dealer) EvictRegistration(procedure wamp.URI, match string) bool {
+	if strings.HasPrefix(string(procedure), "wamp.") {
+		return false
+	}
+	var evicted bool
+	var metaPubs []*wamp.Publish
+	done := make(chan struct{})
+	d.actionChan <- func() {
+		var reg *registration
+		switch match {
+		default:
+			reg = d.procRegMap[procedure]
+		case wamp.MatchPrefix:
+			reg = d.pfxProcRegMap[procedure]
+		case wamp.MatchWildcard:
+			reg = d.wcProcRegMap[procedure]
+		}
+		// Mirror force_reregister (see syncRegister): only a single-policy
+		// registration may be force-evicted; a shared registration is left
+		// intact so a cross-node takeover can never silently drop other callees.
+		if reg != nil && (reg.policy == "" || reg.policy == wamp.InvokeSingle) {
+			metaPubs = d.syncEvictRegistration(reg, false)
+			evicted = true
+		}
+		close(done)
+	}
+	<-done
+	for _, pub := range metaPubs {
+		d.metaPeer.Send() <- pub
+	}
+	return evicted
+}
+
 // call invokes a registered remote procedure.
 func (d *dealer) Call(caller *wamp.Session, msg *wamp.Call) {
 	if caller == nil || msg == nil {

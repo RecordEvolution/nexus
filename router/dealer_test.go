@@ -1676,3 +1676,159 @@ func TestForceReregisterAdvertisedFeature(t *testing.T) {
 	supported, _ := features[wamp.FeatureForceReregister].(bool)
 	require.True(t, supported, "dealer must advertise force_reregister=true")
 }
+
+// TestEvictRegistration pins the EvictRegistration seam used by a clustering
+// layer to honor force_reregister across nodes: it force-drops a local
+// single-policy registration exactly like force_reregister (unsolicited
+// UNREGISTERED with Details.{registration,reason} + on_unregister/on_delete
+// meta events), reports a no-op for an absent procedure, accepts "exact" as an
+// alias for the default match, and leaves the procedure registrable afterward.
+func TestEvictRegistration(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	callee := newTestPeer()
+	sess := wamp.NewSession(callee, 0, nil, nil)
+	dealer.Register(sess, &wamp.Register{Request: 1, Procedure: testProcedure})
+	regID := (<-callee.Recv()).(*wamp.Registered).Registration
+	checkMetaReg(t, metaClient, sess.ID) // on_create
+	checkMetaReg(t, metaClient, sess.ID) // on_register
+
+	// Evicting an unrelated procedure is a no-op.
+	require.False(t, dealer.EvictRegistration("no.such.procedure", ""),
+		"evicting an absent procedure must report no-op")
+
+	// A wamp.* (meta) procedure is never evicted.
+	require.False(t, dealer.EvictRegistration("wamp.registration.list", ""),
+		"wamp.* meta procedures must never be force-evicted")
+
+	// Evicting the single-policy registration reports success and revokes
+	// the callee with the same details force_reregister produces.
+	require.True(t, dealer.EvictRegistration(testProcedure, ""),
+		"evicting a single-policy registration must report success")
+
+	rev, ok := (<-callee.Recv()).(*wamp.Unregistered)
+	require.True(t, ok, "evicted callee should receive UNREGISTERED")
+	require.Equal(t, wamp.ID(0), rev.Request, "revocation UNREGISTERED has Request=0")
+	revRegID, _ := wamp.AsID(rev.Details["registration"])
+	require.Equal(t, regID, revRegID, "revocation Details.registration must match evicted regID")
+	require.Equal(t, string(wamp.ErrUnregistered), rev.Details["reason"])
+
+	checkMetaReg(t, metaClient, sess.ID) // on_unregister
+	checkMetaReg(t, metaClient, sess.ID) // on_delete
+
+	// Dealer state: procedure and reverse mapping gone, callee set cleaned.
+	_, ok = dealer.procRegMap[testProcedure]
+	require.False(t, ok, "procedure must be removed after eviction")
+	_, ok = dealer.registrations[regID]
+	require.False(t, ok, "registration must be removed after eviction")
+	_, ok = dealer.calleeRegIDSet[sess]
+	require.False(t, ok, "evicted callee should be removed from calleeRegIDSet")
+
+	// The procedure is registrable again; "exact" selects the default match.
+	callee2 := newTestPeer()
+	sess2 := wamp.NewSession(callee2, 0, nil, nil)
+	dealer.Register(sess2, &wamp.Register{Request: 2, Procedure: testProcedure})
+	_, ok = (<-callee2.Recv()).(*wamp.Registered)
+	require.True(t, ok, "procedure should be registrable after eviction")
+	checkMetaReg(t, metaClient, sess2.ID) // on_create
+	checkMetaReg(t, metaClient, sess2.ID) // on_register
+
+	require.True(t, dealer.EvictRegistration(testProcedure, "exact"),
+		`"exact" must select the default exact-match registration`)
+	_, ok = (<-callee2.Recv()).(*wamp.Unregistered)
+	require.True(t, ok, "callee2 should be revoked by the exact-alias eviction")
+	checkMetaReg(t, metaClient, sess2.ID) // on_unregister
+	checkMetaReg(t, metaClient, sess2.ID) // on_delete
+}
+
+// TestEvictRegistrationRefusesSharedRegistration confirms EvictRegistration
+// leaves a shared (multi-callee) registration intact — the same guard
+// force_reregister uses — so a cross-node takeover never silently drops the
+// other callees of a roundrobin registration.
+func TestEvictRegistrationRefusesSharedRegistration(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	calleeRoles := wamp.Dict{
+		"roles": wamp.Dict{
+			"callee": wamp.Dict{
+				"features": wamp.Dict{"shared_registration": true},
+			},
+		},
+	}
+	callee := newTestPeer()
+	sess := wamp.NewSession(callee, 0, nil, calleeRoles)
+	dealer.Register(sess, &wamp.Register{
+		Request:   1,
+		Procedure: testProcedure,
+		Options:   wamp.SetOption(nil, wamp.OptInvoke, wamp.InvokeRoundRobin),
+	})
+	regID := (<-callee.Recv()).(*wamp.Registered).Registration
+	checkMetaReg(t, metaClient, sess.ID)
+	checkMetaReg(t, metaClient, sess.ID)
+
+	require.False(t, dealer.EvictRegistration(testProcedure, ""),
+		"a shared registration must not be force-evicted")
+
+	reg, ok := dealer.registrations[regID]
+	require.True(t, ok, "shared registration was unexpectedly removed")
+	require.Equal(t, 1, len(reg.callees))
+	require.Same(t, sess, reg.callees[0])
+
+	select {
+	case msg := <-callee.Recv():
+		require.FailNow(t, "callee should not receive any message", "got %T", msg)
+	default:
+	}
+}
+
+// TestEvictRegistrationMatchPolicies confirms EvictRegistration selects the
+// right match index: a wildcard and a prefix registration are evicted only when
+// addressed with their own match form, never via exact match.
+func TestEvictRegistrationMatchPolicies(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	// Wildcard registration.
+	wcCallee := newTestPeer()
+	wcSess := wamp.NewSession(wcCallee, 0, nil, nil)
+	dealer.Register(wcSess, &wamp.Register{
+		Request:   1,
+		Procedure: testProcedureWC,
+		Options:   wamp.SetOption(nil, wamp.OptMatch, wamp.MatchWildcard),
+	})
+	_, ok := (<-wcCallee.Recv()).(*wamp.Registered)
+	require.True(t, ok, "wildcard registration should succeed")
+	checkMetaReg(t, metaClient, wcSess.ID)
+	checkMetaReg(t, metaClient, wcSess.ID)
+
+	// Exact match must not address a wildcard registration.
+	require.False(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchExact),
+		"exact match must not evict a wildcard registration")
+	// Its own match form does.
+	require.True(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchWildcard),
+		"wildcard registration must be evictable via wildcard match")
+	_, ok = (<-wcCallee.Recv()).(*wamp.Unregistered)
+	require.True(t, ok, "wildcard callee should be revoked")
+	checkMetaReg(t, metaClient, wcSess.ID) // on_unregister
+	checkMetaReg(t, metaClient, wcSess.ID) // on_delete
+
+	// Prefix registration.
+	pfxCallee := newTestPeer()
+	pfxSess := wamp.NewSession(pfxCallee, 0, nil, nil)
+	const pfxProc = wamp.URI("nexus.test")
+	dealer.Register(pfxSess, &wamp.Register{
+		Request:   2,
+		Procedure: pfxProc,
+		Options:   wamp.SetOption(nil, wamp.OptMatch, wamp.MatchPrefix),
+	})
+	_, ok = (<-pfxCallee.Recv()).(*wamp.Registered)
+	require.True(t, ok, "prefix registration should succeed")
+	checkMetaReg(t, metaClient, pfxSess.ID)
+	checkMetaReg(t, metaClient, pfxSess.ID)
+
+	require.True(t, dealer.EvictRegistration(pfxProc, wamp.MatchPrefix),
+		"prefix registration must be evictable via prefix match")
+	_, ok = (<-pfxCallee.Recv()).(*wamp.Unregistered)
+	require.True(t, ok, "prefix callee should be revoked")
+	checkMetaReg(t, metaClient, pfxSess.ID) // on_unregister
+	checkMetaReg(t, metaClient, pfxSess.ID) // on_delete
+}
