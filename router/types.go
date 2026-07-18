@@ -1,6 +1,8 @@
 package router
 
 import (
+	"time"
+
 	"github.com/gammazero/nexus/v3/stdlog"
 	"github.com/gammazero/nexus/v3/wamp"
 )
@@ -82,11 +84,17 @@ type Dealer interface {
 	// the force_reregister option — sending each attached callee an
 	// unsolicited UNREGISTERED and firing on_unregister/on_delete meta
 	// events. match is the WAMP match form (exact/prefix/wildcard, with ""
-	// treated as exact). Returns true if a registration was evicted; false
-	// (no-op) when no local registration matches or it uses a shared
-	// invocation policy. Lets a clustering layer keep invoke=single
-	// effectively single mesh-wide when force_reregister lands on a peer.
-	EvictRegistration(procedure wamp.URI, match string) bool
+	// treated as exact). ifCreatedBefore is a recency guard: when non-zero
+	// the registration is evicted only if created strictly before that
+	// instant, so an eviction that raced with a newer registration of the
+	// same procedure (a delayed cross-node evict arriving after the callee
+	// already re-registered here) never takes down the newer one; zero
+	// evicts unconditionally. Returns true if a registration was evicted;
+	// false (no-op) when no local registration matches, it uses a shared
+	// invocation policy, or the recency guard kept it. Lets a clustering
+	// layer keep invoke=single effectively single mesh-wide when
+	// force_reregister lands on a peer.
+	EvictRegistration(procedure wamp.URI, match string, ifCreatedBefore time.Time) bool
 
 	// Call dispatches a CALL message from a caller to a registered
 	// callee, applying shared-registration policy if set.

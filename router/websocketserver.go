@@ -26,7 +26,13 @@ const (
 	msgpackWebsocketProtocol = "wamp.2.msgpack"
 	cborWebsocketProtocol    = "wamp.2.cbor"
 
-	defaultOutQueueSize = 64
+	// defaultOutQueueSize bounds the per-client outbound message queue
+	// (shared with the rawsocket server). A reconnecting callee replaying a
+	// large batch of REGISTERs receives one REGISTERED per request in a
+	// burst; 64 proved too small for real-world clients replaying ~150
+	// registrations, and an overflowing queue drops router→client messages
+	// (see dealer/broker trySend).
+	defaultOutQueueSize = 256
 )
 
 type protocol struct {

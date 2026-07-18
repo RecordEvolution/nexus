@@ -1694,16 +1694,16 @@ func TestEvictRegistration(t *testing.T) {
 	checkMetaReg(t, metaClient, sess.ID) // on_register
 
 	// Evicting an unrelated procedure is a no-op.
-	require.False(t, dealer.EvictRegistration("no.such.procedure", ""),
+	require.False(t, dealer.EvictRegistration("no.such.procedure", "", time.Time{}),
 		"evicting an absent procedure must report no-op")
 
 	// A wamp.* (meta) procedure is never evicted.
-	require.False(t, dealer.EvictRegistration("wamp.registration.list", ""),
+	require.False(t, dealer.EvictRegistration("wamp.registration.list", "", time.Time{}),
 		"wamp.* meta procedures must never be force-evicted")
 
 	// Evicting the single-policy registration reports success and revokes
 	// the callee with the same details force_reregister produces.
-	require.True(t, dealer.EvictRegistration(testProcedure, ""),
+	require.True(t, dealer.EvictRegistration(testProcedure, "", time.Time{}),
 		"evicting a single-policy registration must report success")
 
 	rev, ok := (<-callee.Recv()).(*wamp.Unregistered)
@@ -1733,7 +1733,7 @@ func TestEvictRegistration(t *testing.T) {
 	checkMetaReg(t, metaClient, sess2.ID) // on_create
 	checkMetaReg(t, metaClient, sess2.ID) // on_register
 
-	require.True(t, dealer.EvictRegistration(testProcedure, "exact"),
+	require.True(t, dealer.EvictRegistration(testProcedure, "exact", time.Time{}),
 		`"exact" must select the default exact-match registration`)
 	_, ok = (<-callee2.Recv()).(*wamp.Unregistered)
 	require.True(t, ok, "callee2 should be revoked by the exact-alias eviction")
@@ -1766,7 +1766,7 @@ func TestEvictRegistrationRefusesSharedRegistration(t *testing.T) {
 	checkMetaReg(t, metaClient, sess.ID)
 	checkMetaReg(t, metaClient, sess.ID)
 
-	require.False(t, dealer.EvictRegistration(testProcedure, ""),
+	require.False(t, dealer.EvictRegistration(testProcedure, "", time.Time{}),
 		"a shared registration must not be force-evicted")
 
 	reg, ok := dealer.registrations[regID]
@@ -1801,10 +1801,10 @@ func TestEvictRegistrationMatchPolicies(t *testing.T) {
 	checkMetaReg(t, metaClient, wcSess.ID)
 
 	// Exact match must not address a wildcard registration.
-	require.False(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchExact),
+	require.False(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchExact, time.Time{}),
 		"exact match must not evict a wildcard registration")
 	// Its own match form does.
-	require.True(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchWildcard),
+	require.True(t, dealer.EvictRegistration(testProcedureWC, wamp.MatchWildcard, time.Time{}),
 		"wildcard registration must be evictable via wildcard match")
 	_, ok = (<-wcCallee.Recv()).(*wamp.Unregistered)
 	require.True(t, ok, "wildcard callee should be revoked")
@@ -1825,10 +1825,141 @@ func TestEvictRegistrationMatchPolicies(t *testing.T) {
 	checkMetaReg(t, metaClient, pfxSess.ID)
 	checkMetaReg(t, metaClient, pfxSess.ID)
 
-	require.True(t, dealer.EvictRegistration(pfxProc, wamp.MatchPrefix),
+	require.True(t, dealer.EvictRegistration(pfxProc, wamp.MatchPrefix, time.Time{}),
 		"prefix registration must be evictable via prefix match")
 	_, ok = (<-pfxCallee.Recv()).(*wamp.Unregistered)
 	require.True(t, ok, "prefix callee should be revoked")
 	checkMetaReg(t, metaClient, pfxSess.ID) // on_unregister
 	checkMetaReg(t, metaClient, pfxSess.ID) // on_delete
+}
+
+// TestEvictRegistrationRecencyGuard pins the ifCreatedBefore contract: an
+// eviction referring to an era before the registration was created must keep
+// it (a delayed cross-node evict must never take down a registration that
+// superseded it), a cutoff exactly at the creation instant keeps it too
+// (at-or-after survives), and a cutoff after creation evicts as usual.
+func TestEvictRegistrationRecencyGuard(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	callee := newTestPeer()
+	sess := wamp.NewSession(callee, 0, nil, nil)
+	dealer.Register(sess, &wamp.Register{Request: 1, Procedure: testProcedure})
+	_, ok := (<-callee.Recv()).(*wamp.Registered)
+	require.True(t, ok, "registration should succeed")
+	checkMetaReg(t, metaClient, sess.ID) // on_create
+	checkMetaReg(t, metaClient, sess.ID) // on_register
+
+	// A cutoff before the registration was created keeps it.
+	require.False(t, dealer.EvictRegistration(testProcedure, "", time.Now().Add(-time.Hour)),
+		"a registration created after the eviction cutoff must survive")
+
+	// The boundary is inclusive on the survivor side: created exactly AT the
+	// cutoff is not "before" it.
+	reg, ok := dealer.procRegMap[testProcedure]
+	require.True(t, ok, "guarded eviction must leave the registration in place")
+	require.False(t, dealer.EvictRegistration(testProcedure, "", reg.createdAt),
+		"a registration created exactly at the cutoff must survive")
+
+	// The kept callee saw no revocation.
+	select {
+	case msg := <-callee.Recv():
+		require.FailNow(t, "callee of a kept registration must receive nothing",
+			"got %T", msg)
+	default:
+	}
+
+	// A cutoff after creation evicts, with the usual revocation + meta events.
+	require.True(t, dealer.EvictRegistration(testProcedure, "", time.Now().Add(time.Hour)),
+		"a registration created before the eviction cutoff must be evicted")
+	_, ok = (<-callee.Recv()).(*wamp.Unregistered)
+	require.True(t, ok, "evicted callee should receive UNREGISTERED")
+	checkMetaReg(t, metaClient, sess.ID) // on_unregister
+	checkMetaReg(t, metaClient, sess.ID) // on_delete
+}
+
+// TestRegisterUndeliverableAckCreatesNoRegistration pins the REGISTERED-ack
+// integrity invariant: when the ack cannot even be queued on the callee's
+// outbound channel, the dealer must not create the registration. A
+// registration the callee never learned about receives INVOCATIONs for an
+// unknown registration ID — a protocol violation that makes some clients
+// (autobahn-js) drop the whole connection, re-triggering the register burst
+// that overflowed the queue in the first place.
+func TestRegisterUndeliverableAckCreatesNoRegistration(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	// A callee whose single-slot outbound queue is already occupied: the
+	// REGISTERED ack cannot be queued.
+	blocked := newTestPeer()
+	blocked.Send() <- &wamp.Hello{}
+	blockedSess := wamp.NewSession(blocked, 0, nil, nil)
+	dealer.Register(blockedSess, &wamp.Register{Request: 1, Procedure: testProcedure})
+
+	// Dealer-side state must not exist.
+	_, ok := dealer.procRegMap[testProcedure]
+	require.False(t, ok, "no registration may exist when the REGISTERED ack was dropped")
+	_, ok = dealer.calleeRegIDSet[blockedSess]
+	require.False(t, ok, "failed register must not be tracked against the callee")
+
+	// The callee's queue still holds only the pre-filled message.
+	require.IsType(t, &wamp.Hello{}, <-blocked.Recv())
+	select {
+	case msg := <-blocked.Recv():
+		require.FailNow(t, "blocked callee must not receive anything", "got %T", msg)
+	default:
+	}
+
+	// The procedure remains registrable by a healthy callee — no ghost
+	// single-policy registration blocks it — and the first meta events fired
+	// belong to that callee (a failed register fires none; checkMetaReg
+	// asserts the session ID).
+	callee := newTestPeer()
+	sess := wamp.NewSession(callee, 0, nil, nil)
+	dealer.Register(sess, &wamp.Register{Request: 2, Procedure: testProcedure})
+	_, ok = (<-callee.Recv()).(*wamp.Registered)
+	require.True(t, ok, "procedure must be registrable after the failed register")
+	checkMetaReg(t, metaClient, sess.ID) // on_create
+	checkMetaReg(t, metaClient, sess.ID) // on_register
+}
+
+// TestRegisterSharedJoinUndeliverableAckNotAdded is the shared-registration
+// variant of the ack-integrity invariant: a callee joining an existing
+// shared registration whose REGISTERED ack cannot be queued must not be
+// added as a callee (it would receive round-robin INVOCATIONs for a
+// registration ID it never learned).
+func TestRegisterSharedJoinUndeliverableAckNotAdded(t *testing.T) {
+	dealer, metaClient := newTestDealer(t)
+
+	calleeRoles := wamp.Dict{
+		"roles": wamp.Dict{
+			"callee": wamp.Dict{
+				"features": wamp.Dict{"shared_registration": true},
+			},
+		},
+	}
+	c1 := newTestPeer()
+	s1 := wamp.NewSession(c1, 0, nil, calleeRoles)
+	dealer.Register(s1, &wamp.Register{
+		Request:   1,
+		Procedure: testProcedure,
+		Options:   wamp.SetOption(nil, wamp.OptInvoke, wamp.InvokeRoundRobin),
+	})
+	regID := (<-c1.Recv()).(*wamp.Registered).Registration
+	checkMetaReg(t, metaClient, s1.ID) // on_create
+	checkMetaReg(t, metaClient, s1.ID) // on_register
+
+	blocked := newTestPeer()
+	blocked.Send() <- &wamp.Hello{}
+	s2 := wamp.NewSession(blocked, 0, nil, calleeRoles)
+	dealer.Register(s2, &wamp.Register{
+		Request:   2,
+		Procedure: testProcedure,
+		Options:   wamp.SetOption(nil, wamp.OptInvoke, wamp.InvokeRoundRobin),
+	})
+
+	reg, ok := dealer.registrations[regID]
+	require.True(t, ok, "existing shared registration must remain")
+	require.Equal(t, 1, len(reg.callees), "callee with dropped ack must not join the registration")
+	require.Same(t, s1, reg.callees[0])
+	_, ok = dealer.calleeRegIDSet[s2]
+	require.False(t, ok, "failed join must not be tracked against the callee")
 }

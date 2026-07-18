@@ -42,14 +42,15 @@ var dealerRole = wamp.Dict{ //nolint:gochecknoglobals
 
 // remoteProcedure tracks in-progress remote procedure call
 type registration struct {
-	id             wamp.ID  // registration ID
-	procedure      wamp.URI // procedure this registration is for
-	created        string   // when registration was created
-	match          string   // how procedure uri is matched to registration
-	policy         string   // how callee is selected if shared registration
-	disclose       bool     // callee requests disclosure of caller identity
-	forwardTimeout bool     // callee requests to handle the timeout logic
-	nextCallee     int      // choose callee for round-robin invocation.
+	id             wamp.ID   // registration ID
+	procedure      wamp.URI  // procedure this registration is for
+	created        string    // when registration was created (ISO8601, for meta API)
+	createdAt      time.Time // same instant with full resolution, for recency checks
+	match          string    // how procedure uri is matched to registration
+	policy         string    // how callee is selected if shared registration
+	disclose       bool      // callee requests disclosure of caller identity
+	forwardTimeout bool      // callee requests to handle the timeout logic
+	nextCallee     int       // choose callee for round-robin invocation.
 
 	// Multiple sessions can register as callees depending on invocation policy
 	// resulting in multiple procedures for the same registration ID.
@@ -301,10 +302,20 @@ func (d *dealer) Unregister(callee *wamp.Session, msg *wamp.Unregister) {
 // force_reregister — a clustering layer that accepted a force_reregister on one
 // node calls this on the peers holding the prior registration so invoke=single
 // stays effectively single mesh-wide. match is the WAMP match form (with ""
-// and "exact" both selecting exact-match). Returns false (no-op) for a wamp.*
-// procedure, when no local registration matches, or when the matched
-// registration uses a shared (multi-callee) invocation policy.
-func (d *dealer) EvictRegistration(procedure wamp.URI, match string) bool {
+// and "exact" both selecting exact-match).
+//
+// ifCreatedBefore is a recency guard: when non-zero, the registration is
+// evicted only if it was created strictly before that instant. An eviction
+// request that raced with a newer registration of the same procedure (e.g. a
+// delayed cross-node eviction arriving after the callee already re-registered
+// here) must never take down the newer registration; the caller expresses the
+// era its eviction refers to and anything at-or-after survives. A zero time
+// evicts unconditionally.
+//
+// Returns false (no-op) for a wamp.* procedure, when no local registration
+// matches, when the matched registration uses a shared (multi-callee)
+// invocation policy, or when the recency guard kept it.
+func (d *dealer) EvictRegistration(procedure wamp.URI, match string, ifCreatedBefore time.Time) bool {
 	if strings.HasPrefix(string(procedure), "wamp.") {
 		return false
 	}
@@ -325,8 +336,16 @@ func (d *dealer) EvictRegistration(procedure wamp.URI, match string) bool {
 		// registration may be force-evicted; a shared registration is left
 		// intact so a cross-node takeover can never silently drop other callees.
 		if reg != nil && (reg.policy == "" || reg.policy == wamp.InvokeSingle) {
-			metaPubs = d.syncEvictRegistration(reg, false)
-			evicted = true
+			if !ifCreatedBefore.IsZero() && !reg.createdAt.Before(ifCreatedBefore) {
+				// Not debug-gated: a skipped eviction is the trace of a raced
+				// takeover and is rare, but essential when reconstructing why
+				// a procedure did (not) survive one.
+				d.log.Printf("EvictRegistration: keeping %v registration created %s (not before eviction cutoff %s)",
+					procedure, reg.createdAt.Format(time.RFC3339Nano), ifCreatedBefore.Format(time.RFC3339Nano))
+			} else {
+				metaPubs = d.syncEvictRegistration(reg, false)
+				evicted = true
+			}
 		}
 		close(done)
 	}
@@ -623,17 +642,72 @@ func (d *dealer) syncRegister(callee *wamp.Session, msg *wamp.Register, match, i
 		reg = nil
 	}
 
-	var created string
 	var regID wamp.ID
+	if reg == nil {
+		regID = d.idGen.Next()
+	} else {
+		// There is an existing registration(s) for this procedure. See if
+		// invocation policy allows another.
+
+		// Found an existing registration that has an invocation strategy that
+		// only allows a single callee on the given registration.
+		if reg.policy == "" || reg.policy == wamp.InvokeSingle {
+			d.log.Println("REGISTER for already registered procedure",
+				msg.Procedure, "from callee", callee)
+			d.trySend(callee, &wamp.Error{
+				Type:    msg.MessageType(),
+				Request: msg.Request,
+				Details: wamp.Dict{},
+				Error:   wamp.ErrProcedureAlreadyExists,
+			})
+			return metaPubs
+		}
+
+		// Found an existing registration that has an invocation strategy
+		// different from the one requested by the new callee.
+		if reg.policy != invokePolicy {
+			d.log.Println("REGISTER for already registered procedure",
+				msg.Procedure, "with conflicting invocation policy (has",
+				reg.policy, "and requested", invokePolicy)
+			d.trySend(callee, &wamp.Error{
+				Type:    msg.MessageType(),
+				Request: msg.Request,
+				Details: wamp.Dict{},
+				Error:   wamp.ErrProcedureAlreadyExists,
+			})
+			return metaPubs
+		}
+
+		regID = reg.id
+	}
+
+	// Deliver the REGISTERED ack before creating any registration state. The
+	// dealer and the callee must agree on whether a registration exists: if
+	// the ack cannot even be queued (outbound queue full, session closing),
+	// registering anyway would leave the callee unaware of the registration —
+	// a later INVOCATION for the unknown registration ID is a protocol
+	// violation that makes some clients (autobahn-js) drop the connection.
+	// Failing the register entirely keeps both views consistent: the callee
+	// sees an unacknowledged (failed) register and retries or reconnects.
+	if !d.trySend(callee, &wamp.Registered{
+		Request:      msg.Request,
+		Registration: regID,
+	}) {
+		d.log.Printf("REGISTERED for procedure %v undeliverable to callee %v; registration not created",
+			msg.Procedure, callee)
+		return metaPubs
+	}
+
 	// If no existing registration found for the procedure, then create a new
 	// registration.
 	if reg == nil {
-		regID = d.idGen.Next()
-		created = wamp.NowISO8601()
+		now := time.Now()
+		created := wamp.ISO8601(now)
 		reg = &registration{
 			id:             regID,
 			procedure:      msg.Procedure,
 			created:        created,
+			createdAt:      now,
 			match:          match,
 			policy:         invokePolicy,
 			disclose:       disclose,
@@ -672,40 +746,6 @@ func (d *dealer) syncRegister(callee *wamp.Session, msg *wamp.Register, match, i
 			d.regObserver(true, msg.Procedure, observerMatch(match), observerInvoke(invokePolicy))
 		}
 	} else {
-		// There is an existing registration(s) for this procedure. See if
-		// invocation policy allows another.
-
-		// Found an existing registration that has an invocation strategy that
-		// only allows a single callee on the given registration.
-		if reg.policy == "" || reg.policy == wamp.InvokeSingle {
-			d.log.Println("REGISTER for already registered procedure",
-				msg.Procedure, "from callee", callee)
-			d.trySend(callee, &wamp.Error{
-				Type:    msg.MessageType(),
-				Request: msg.Request,
-				Details: wamp.Dict{},
-				Error:   wamp.ErrProcedureAlreadyExists,
-			})
-			return metaPubs
-		}
-
-		// Found an existing registration that has an invocation strategy
-		// different from the one requested by the new callee.
-		if reg.policy != invokePolicy {
-			d.log.Println("REGISTER for already registered procedure",
-				msg.Procedure, "with conflicting invocation policy (has",
-				reg.policy, "and requested", invokePolicy)
-			d.trySend(callee, &wamp.Error{
-				Type:    msg.MessageType(),
-				Request: msg.Request,
-				Details: wamp.Dict{},
-				Error:   wamp.ErrProcedureAlreadyExists,
-			})
-			return metaPubs
-		}
-
-		regID = reg.id
-
 		// Add callee for the registration.
 		reg.callees = append(reg.callees, callee)
 	}
@@ -720,10 +760,6 @@ func (d *dealer) syncRegister(callee *wamp.Session, msg *wamp.Register, match, i
 		d.log.Printf("Registered procedure %v (regID=%v) to callee %v",
 			msg.Procedure, regID, callee)
 	}
-	d.trySend(callee, &wamp.Registered{
-		Request:      msg.Request,
-		Registration: regID,
-	})
 
 	if !wampURI && d.metaPeer != nil {
 		// Publish wamp.registration.on_register meta event. Fired when a
@@ -1830,7 +1866,12 @@ func (d *dealer) RegCountCallees(msg *wamp.Invocation) wamp.Message {
 	}
 }
 
-func (d *dealer) trySend(sess *wamp.Session, msg wamp.Message) {
+// trySend queues msg on the session's outbound channel without ever blocking
+// the dealer goroutine, reporting whether the message was accepted. Most
+// callers are fire-and-forget (a drop only degrades that one session), but
+// callers whose state must stay consistent with what the client saw (e.g.
+// the REGISTERED ack in syncRegister) use the result to abort instead.
+func (d *dealer) trySend(sess *wamp.Session, msg wamp.Message) (sent bool) {
 	// Recover from a "send on closed channel" panic: the session's handler
 	// goroutine may have exited (and closed its peer) concurrently with the
 	// dealer's actor goroutine processing this in-flight action. select +
@@ -1839,13 +1880,16 @@ func (d *dealer) trySend(sess *wamp.Session, msg wamp.Message) {
 	// than crashing the router process.
 	defer func() {
 		if r := recover(); r != nil {
+			sent = false
 			d.log.Printf("Dropped %s to closed session %s: %v", msg.MessageType(), sess, r)
 		}
 	}()
 	select {
 	case sess.Send() <- msg:
+		return true
 	default:
 		d.log.Printf("!!! Dropped %s to session %s: blocked", msg.MessageType(), sess)
+		return false
 	}
 }
 
