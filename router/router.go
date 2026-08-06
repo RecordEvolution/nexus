@@ -63,6 +63,16 @@ type Router interface {
 	// exposed so an embedder (e.g. the cluster mesh) can enforce
 	// single-authority identities without standing up a meta caller.
 	KillSessionsByAuthid(realm wamp.URI, authid string, exclude wamp.ID) int
+
+	// KillSessionsByAuthrole closes every session on the named realm whose
+	// authrole equals the given value, except the session identified by
+	// exclude (pass 0 to exclude none), sending the supplied GOODBYE reason
+	// and message. It returns the number of sessions closed, or -1 if the
+	// realm is not served by this router. Go-level equivalent of the
+	// wamp.session.kill_by_authrole meta procedure, exposed so an embedder can
+	// revoke a role WITHOUT enabling meta-kill on the realm — which would
+	// otherwise hand every client on that realm a session-kill button.
+	KillSessionsByAuthrole(realm wamp.URI, authrole string, reason wamp.URI, message string, exclude wamp.ID) int
 }
 
 // router is the default WAMP router implementation.
@@ -101,6 +111,33 @@ func (r *router) KillSessionsByAuthid(realmURI wamp.URI, authid string, exclude 
 	}
 	return realm.killSessionsByDetail("authid", authid, wamp.CloseNormal,
 		"superseded by a newer session with the same authid", exclude)
+}
+
+// KillSessionsByAuthrole closes every session on realmURI whose authrole
+// matches, except exclude (0 = none). Returns the kill count, or -1 if the
+// realm is not served here. Same actor discipline as KillSessionsByAuthid: the
+// realm is located under the router actor, the kill runs on the realm actor.
+//
+// Unlike KillSessionsByAuthid the GOODBYE reason is caller-supplied — a
+// revocation is not "superseded", and clients distinguish the two: an
+// autobahn-python component treats wamp.close.normal as a clean shutdown and
+// winds its reconnect backoff up, whereas a custom reason keeps it on the fast
+// retry path (where the re-HELLO is then refused by the authenticator).
+func (r *router) KillSessionsByAuthrole(realmURI wamp.URI, authrole string, reason wamp.URI, message string, exclude wamp.ID) int {
+	var realm *realm
+	sync := make(chan struct{})
+	r.actionChan <- func() {
+		realm = r.realms[realmURI]
+		close(sync)
+	}
+	<-sync
+	if realm == nil {
+		return -1
+	}
+	if reason == "" {
+		reason = wamp.CloseNormal
+	}
+	return realm.killSessionsByDetail("authrole", authrole, reason, message, exclude)
 }
 
 // NewRouter creates a WAMP router instance.
